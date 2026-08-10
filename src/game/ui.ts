@@ -239,7 +239,7 @@ export const GAME_UI = `<!doctype html>
           <button class="item dim" id="helpItem">?. help</button>
         </div>
         <div id="hintBox" class="hint" style="display:none">
-          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span>, or <span class="mono">buy</span>/<span class="mono">sell</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
+          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span>, or for crypto <span class="mono">buy</span>/<span class="mono">sell</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
         </div>
         <div id="saved" class="saved">
           <h3>saved games</h3>
@@ -497,7 +497,7 @@ export const GAME_UI = `<!doctype html>
       }
 
       function helpText() {
-        line('commands: a number picks that choice; for the market try "yes", "no", "pass", "lock"; q saves &amp; quits; a abandons; r or n on the end screen; ? this help.', 'plate');
+        line('commands: a number picks that choice; for the market try "yes", "no", "pass", "lock"; for crypto try "buy", "sell", "pass"; q saves &amp; quits; a abandons; r or n on the end screen; ? this help.', 'plate');
       }
 
       function handleInput(raw) {
