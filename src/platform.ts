@@ -52,7 +52,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
   const client = new ContinueClient({ baseUrl, apiKey: firstKey });
 
   const agent = new AgentController(client, downloadDir);
-  const game = new GameController(client);
+  const game = new GameController(client, downloadDir);
 
   const app = express();
   app.disable('x-powered-by');

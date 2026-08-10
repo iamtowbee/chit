@@ -15,6 +15,13 @@ import {
   nodeAt,
   progress,
 } from '../src/game/engine.js';
+import {
+  buildPlays,
+  initialMarketGame,
+  isBakePhase,
+  resolveMarketPlay,
+  type MarketGameData,
+} from '../src/game/market.js';
 import { NODES } from '../src/game/story.js';
 
 function pick(data: ReturnType<typeof initialState>, to: string): number {
@@ -262,5 +269,248 @@ describe('game sessions skip the watchdog', () => {
     const ids = stalled.map((s) => s.id);
     expect(ids).toContain(taskSession.id);
     expect(ids).not.toContain(gameSession.id);
+  });
+});
+
+describe('market game — played on the market', () => {
+  it('builds a seeded play pool from the simulator', async () => {
+    const { plays, markets } = await buildPlays({ mode: 'sim', seed: 7 });
+    expect(markets).toBeGreaterThan(0);
+    expect(plays.length).toBeGreaterThan(0);
+    for (const play of plays) {
+      expect(play.bestReturn).toBeGreaterThan(0);
+      expect(play.yesPrice).toBeGreaterThan(0);
+      expect(play.noPrice).toBeGreaterThan(0);
+      expect(play.yesPrice + play.noPrice).toBeLessThan(1);
+    }
+  });
+
+  it('arbitrage locks a guaranteed profit', () => {
+    const state = initialMarketGame(
+      [{ id: 'm', question: 'Q', yesPrice: 0.55, noPrice: 0.4, bestReturn: 0.05, type: 'within-market' }],
+      { mode: 'sim', seed: 1, source: 'simulator' },
+    );
+    const next = resolveMarketPlay(state, 0);
+    expect(next.purse).toBeCloseTo(100 * 1.05, 5);
+    expect(next.arbs).toBe(1);
+    expect(next.decisions).toBe(1);
+    expect(next.history[0].action).toBe('Arbitrage');
+  });
+
+  it('buying a single side resolves with a win or a loss', () => {
+    const state = initialMarketGame(
+      [{ id: 'm', question: 'Q', yesPrice: 0.55, noPrice: 0.4, bestReturn: 0.05, type: 'within-market' }],
+      { mode: 'sim', seed: 1, source: 'simulator' },
+    );
+    const next = resolveMarketPlay(state, 1);
+    expect(next.gambles).toBe(1);
+    expect(next.history.length).toBe(1);
+    const { stake, result } = next.history[0];
+    expect(stake).toBeCloseTo(25, 5);
+    if (result > 0) {
+      expect(next.wins).toBe(1);
+      expect(result).toBeCloseTo(20.45, 5);
+    } else {
+      expect(next.losses).toBe(1);
+      expect(result).toBeCloseTo(-25, 5);
+    }
+    expect(next.purse).toBeCloseTo(100 + result, 5);
+  });
+
+  it('passing keeps the purse unchanged', () => {
+    const state = initialMarketGame(
+      [{ id: 'm', question: 'Q', yesPrice: 0.55, noPrice: 0.4, bestReturn: 0.05, type: 'within-market' }],
+      { mode: 'sim', seed: 1, source: 'simulator' },
+    );
+    const next = resolveMarketPlay(state, 3);
+    expect(next.purse).toBe(100);
+    expect(next.passes).toBe(1);
+    expect(next.history[0].result).toBe(0);
+  });
+
+  it('arbitraging every window reaches the Grand Bake and a win', () => {
+    let state = initialMarketGame(
+      [
+        { id: 'a', question: 'A', yesPrice: 0.55, noPrice: 0.4, bestReturn: 0.05, type: 'within-market' },
+        { id: 'b', question: 'B', yesPrice: 0.5, noPrice: 0.45, bestReturn: 0.05, type: 'cross-market' },
+        { id: 'c', question: 'C', yesPrice: 0.5, noPrice: 0.45, bestReturn: 0.05, type: 'within-market' },
+        { id: 'd', question: 'D', yesPrice: 0.5, noPrice: 0.45, bestReturn: 0.05, type: 'cross-market' },
+      ],
+      { mode: 'sim', seed: 1, source: 'simulator' },
+    );
+    while (!isBakePhase(state) && state.outcome === null && state.round < state.plays.length) {
+      state = resolveMarketPlay(state, 0);
+    }
+    expect(isBakePhase(state)).toBe(true);
+    expect(state.purse).toBeGreaterThan(state.startPurse * 1.15);
+    state = resolveMarketPlay(state, 1);
+    expect(state.outcome).toBe('win');
+    expect(state.ending).toBe('grand');
+    expect(state.name).toBe('Sir Frostbite');
+  });
+
+  it('a losing streak can break the purse', () => {
+    const plays = [
+      { id: 'm', question: 'Q', yesPrice: 0.99, noPrice: 0.01, bestReturn: 0.001, type: 'within-market' as const },
+    ];
+    let broke = false;
+    for (let seed = 0; seed < 2000 && !broke; seed += 1) {
+      const many: typeof plays = [];
+      for (let i = 0; i < 6; i += 1) many.push({ ...plays[0], id: 'm' + i });
+      let state = initialMarketGame(many, { mode: 'sim', seed, source: 'simulator' });
+      for (let i = 0; i < 6 && state.outcome === null; i += 1) {
+        state = resolveMarketPlay(state, 2);
+      }
+      if (state.outcome === 'lose' && state.ending === 'broke') broke = true;
+    }
+    expect(broke).toBe(true);
+  });
+});
+
+describe('market game over HTTP', () => {
+  let port: number;
+  let baseUrl: string;
+  let dataServer: Server;
+  let handle: ReturnType<typeof createPlatform>;
+
+  const SNAPSHOT = [
+    {
+      id: 'm1',
+      question: 'Will event X happen?',
+      outcomes: [
+        { name: 'Yes', price: 0.55 },
+        { name: 'No', price: 0.4 },
+      ],
+    },
+    {
+      id: 'm2',
+      eventId: 'e2',
+      question: 'Will Y happen? (A)',
+      outcomes: [
+        { name: 'Yes', price: 0.62 },
+        { name: 'No', price: 0.41 },
+      ],
+    },
+    {
+      id: 'm3',
+      eventId: 'e2',
+      question: 'Will Y happen?',
+      outcomes: [
+        { name: 'Yes', price: 0.42 },
+        { name: 'No', price: 0.52 },
+      ],
+    },
+  ];
+
+  beforeAll(async () => {
+    port = await new Promise<number>((resolve, reject) => {
+      const srv = createHttpServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+      srv.on('error', reject);
+    });
+    const root = mkdtempSync(path.join(tmpdir(), 'game-mkt-'));
+    handle = createPlatform({
+      port,
+      dataDir: path.join(root, 'data'),
+      downloadDir: path.join(root, 'downloads'),
+    });
+    await new Promise<void>((resolve) => {
+      const server = createHttpServer(handle.app);
+      server.listen(port, '127.0.0.1', resolve);
+    });
+    baseUrl = `http://127.0.0.1:${port}`;
+
+    const payload = Buffer.from(JSON.stringify(SNAPSHOT));
+    dataServer = createHttpServer((req, res) => {
+      const range = req.headers.range;
+      if (range) {
+        const start = Number(/^bytes=(\d+)-/.exec(range)?.[1] ?? 0);
+        res.writeHead(206, {
+          'content-range': `bytes ${start}-${payload.length - 1}/${payload.length}`,
+          'content-length': payload.length - start,
+          'accept-ranges': 'bytes',
+        });
+        res.end(payload.subarray(start));
+      } else {
+        res.writeHead(200, { 'content-length': payload.length });
+        res.end(payload);
+      }
+    });
+    await new Promise<void>((resolve) => dataServer.listen(0, '127.0.0.1', resolve));
+  });
+
+  afterAll(async () => {
+    await handle.store.flush();
+    dataServer.close();
+  });
+
+  it('creates a sim market game with four decisions per round', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'market', seed: 3 }),
+      })
+    ).json();
+    const game = created.game;
+    expect(game.kind).toBe('market');
+    expect(game.market.rounds).toBeGreaterThan(0);
+    expect(game.choices.length).toBe(4);
+    expect(game.market.purse).toBe(100);
+    expect(game.choices[0].label).toMatch(/Arbitrage/);
+  });
+
+  it('creates a file market game from a downloaded snapshot', async () => {
+    const sourceUrl = `http://127.0.0.1:${(dataServer.address() as { port: number }).port}/markets.json`;
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'market', sourceUrl, filename: 'markets.json', seed: 1 }),
+      })
+    ).json();
+    expect(created.game.kind).toBe('market');
+    expect(created.game.market.mode).toBe('file');
+    expect(created.game.market.rounds).toBeGreaterThanOrEqual(1);
+    expect(created.game.market.source).toBe('markets.json');
+  });
+
+  it('plays a full market game to a won Grand Bake over HTTP', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'market', seed: 11 }),
+      })
+    ).json();
+    const id = created.game.id;
+    let game = created.game;
+    let rounds = 0;
+    while (game.kind === 'market' && !game.outcome && game.market.phase === 'play' && rounds < 30) {
+      const acted = await (
+        await fetch(`${baseUrl}/game/${id}/act`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ choice: 0 }),
+        })
+      ).json();
+      game = acted.game;
+      rounds += 1;
+    }
+    expect(game.market.phase).toBe('bake');
+    const named = await (
+      await fetch(`${baseUrl}/game/${id}/act`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ choice: 0 }),
+      })
+    ).json();
+    expect(named.game.outcome).toBe('win');
+    expect(named.game.status).toBe('done');
+    expect(named.game.market.ending).toBe('grand');
   });
 });
