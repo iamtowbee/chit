@@ -1,0 +1,458 @@
+# Chit — Agent Platform for Trading
+
+A trading-agent platform: the **Chit JIT core** (`chit/`, Rust + C++ + Python) is the
+high-performance execution engine, and the **Continue Protocol** (`src/`) is the
+agent runtime — an 11-state machine + file-backed persistence layer for
+long-running, resumable agents. On top of that runtime sit real-world
+applications: the **Polyarb** market-scanning and arbitrage bot, and the
+**Download Box** background downloader.
+
+An agent is a **session**: it starts, periodically reports progress via
+heartbeats, and can be picked back up later — even after a crash — using its
+saved checkpoints. Strategies and scans are checkpointed, so a machine that
+reboots or a bot that is interrupted continues from the exact step it stopped at
+instead of restarting.
+
+```
+chit/                 JIT compiler core (Rust + C++, Python bindings)
+src/                  Continue Protocol runtime (TypeScript API + persistence)
+src/polyarb/          Polyarb — Polymarket arbitrage bot
+src/downloader.ts     Range-resumable download engine
+src/downloadbox.ts    Download Box web UI + worker
+examples/             Runnable example apps on the runtime
+```
+
+## Chit JIT core
+
+`chit/` is the vendored execution engine: a JIT compiler in Rust (Cranelift
+backend) with a C++ path and Python bindings. In the platform it is the
+performance layer — strategy and pricing code written in Python is JIT-compiled
+at runtime instead of interpreted, which matters for strategies that evaluate
+many markets per tick.
+
+```bash
+# Build the JIT core (from the chit/ directory)
+cd chit && make all
+
+# Or just the Python bindings
+cd chit && pip install -e python/
+```
+
+The bot and API do not depend on `chit/` at runtime; they run on plain Node.js.
+The JIT core is a drop-in accelerator for strategy code, integrated through the
+Python bindings. See `chit/README.md` for the compiler's own documentation.
+
+## Concepts
+
+- **Session** — a unit of resumable work, identified by a UUID.
+- **Status** — the lifecycle state machine:
+
+```mermaid
+graph TD
+    P["pending"] --> Q["queued"]
+    Q --> A["active"]
+    A --> PZ["paused"]
+    PZ --> R["resuming"]
+    R --> A
+    A --> ST["stalled"]
+    ST --> RT["retrying"]
+    RT --> A
+    A --> V["verifying"]
+    V --> D["done"]
+    P --> V
+    Q --> V
+    A --> F["failed"]
+    P --> F
+    F --> TERM1["terminal"]
+    D --> TERM1
+    C["cancelled"] --> TERM1
+    V --> C
+    V --> F
+```
+
+- `pending` — created but not yet queued.
+- `queued` — scheduled, waiting for a worker to pick it up.
+- `active` — running and receiving heartbeats.
+- `paused` — suspended by an operator.
+- `resuming` — transient state while waking from pause.
+- `stalled` — heartbeat timed out; flagged for intervention.
+- `retrying` — a step failed but is eligible for another attempt.
+- `verifying` — work complete, post-processing/validation running.
+- `done`, `cancelled`, `failed` — terminal; no further transitions allowed.
+- **Checkpoint** — each heartbeat/checkpoint appends an immutable snapshot
+  (`step`, `progress`, `data`) to the session's history, so work can be resumed
+  from the last known position.
+- **Watchdog** — marks `active`/`paused`/`resuming`/`retrying` sessions as `stalled`
+  when their last heartbeat is older than `STALL_TIMEOUT_MS` (default `60000`).
+- **Retry policy** — optional `maxAttempts` per session. Each `retry` increments
+  `attempts`; once `attempts >= maxAttempts`, the session transitions to `failed`
+  with `error: "max attempts exceeded"`.
+- **Webhooks** — optional `webhookUrl` per session. A `transition` event is POSTed
+  (best-effort, fire-and-forget) whenever the status changes:
+  `{ "event": "transition", "from", "to", "session", "at" }`.
+- **Metrics** — `GET /api/metrics` exposes `created`, `transitions`, `fromTo`
+  (transition counts), `terminal`, and `current` (live status distribution).
+- **Resume from checkpoint** — `resume` accepts `checkpointId` or `step` to rewind
+  a session to a specific saved point instead of always continuing from the latest.
+- **Pagination** — `GET /api/sessions` supports `limit` (default 20, max 100),
+  `offset`, and `cursor` (a session id), returning `pagination.total`/`hasMore`.
+- **Auth + tenants** — set `API_KEYS=alice=sk-alice1,bob=sk-bob1` (or bare keys)
+  to require `Authorization: Bearer <key>` / `X-API-Key` and namespace sessions
+  per tenant. Without `API_KEYS`, the API runs open (`public` tenant).
+- **OpenAPI** — a full OpenAPI 3.0 spec at `GET /api/docs` and Swagger UI at
+  `GET /api/docs/html`.
+- **Docker** — `Dockerfile` + `docker-compose.yml` for a portable deploy.
+
+## Quick start
+
+```bash
+npm install
+npm run dev          # http://localhost:3001
+```
+
+State persists to `data/sessions.json` (override with `DATA_DIR`).
+Port is `PORT` (default `3001`); stall timeout is `STALL_TIMEOUT_MS`.
+
+## API
+
+Base path: `/api`
+
+### Create a session
+
+```
+POST /api/sessions
+Content-Type: application/json
+Idempotency-Key: <optional, dedupes repeat calls>
+
+{
+  "totalSteps": 10,
+  "metadata": { "task": "build" },
+  "data": { "seed": 42 },
+  "maxAttempts": 3,
+  "webhookUrl": "https://hooks.example.com/continue"
+}
+```
+
+`201 Created` on first call, `200 OK` when the same `Idempotency-Key` is reused.
+
+### List / get / health / metrics
+
+```
+GET  /api/sessions
+GET  /api/sessions?status=done
+GET  /api/sessions?limit=20&offset=40
+GET  /api/sessions?limit=20&cursor=<session-id>
+GET  /api/sessions/:id
+GET  /api/health
+GET  /api/metrics
+GET  /api/docs          # OpenAPI 3.0 spec (JSON)
+GET  /api/docs/html     # Swagger UI
+```
+
+### Lifecycle endpoints
+
+| Endpoint | Transition | Notes |
+| -------- | ---------- | ----- |
+| `POST /api/sessions/:id/queue` | `pending -> queued` | Schedule the work |
+| `POST /api/sessions/:id/start` | `queued -> active` | Worker picks it up |
+| `POST /api/sessions/:id/heartbeat` | -> `active` | Report liveness + progress, records a checkpoint |
+| `POST /api/sessions/:id/checkpoint` | -> `active` | Same as heartbeat; explicit resume point |
+| `POST /api/sessions/:id/resume` | `paused/stalled -> resuming` | Wake up; body may carry `checkpointId` or `step` to rewind; next heartbeat returns to `active` |
+| `POST /api/sessions/:id/retry` | `stalled -> retrying` | Automatic-retry path; heartbeat returns to `active` |
+| `POST /api/sessions/:id/pause` | `active -> paused` | Suspend |
+| `POST /api/sessions/:id/stall` | -> `stalled` | Manual stall (watchdog does this automatically) |
+| `POST /api/sessions/:id/complete` | -> `verifying` | Work done; post-processing begins |
+| `POST /api/sessions/:id/finalize` | `verifying -> done` | Validation passed, sets `progress` to 1 |
+| `POST /api/sessions/:id/cancel` | -> `cancelled` | Body: `{ "reason" }` |
+| `POST /api/sessions/:id/fail` | -> `failed` | Body: `{ "error" }` required |
+| `POST /api/watchdog` | -> `stalled` | Manually run the stall watchdog |
+
+### Heartbeat body
+
+```
+POST /api/sessions/:id/heartbeat
+{ "step": 4, "progress": 0.4, "data": { "cursor": "abc" } }
+```
+
+## Error handling
+
+| Status | Meaning |
+| ------ | ------- |
+| `400` | Bad request body, invalid status filter, missing required field |
+| `404` | Unknown session id |
+| `409` | Invalid state transition (e.g. heartbeat before `start`) |
+| `500` | Internal error |
+
+Errors are JSON: `{ "error": "message" }`.
+
+## Authentication
+
+By default the API is open. To enable tenant isolation, set `API_KEYS` as a
+comma-separated list of `name=key` pairs (bare keys map to the `public` tenant):
+
+```bash
+API_KEYS="alice=sk-alice-123,bob=sk-bob-456"
+```
+
+Authenticate with either header:
+
+```
+Authorization: Bearer sk-alice-123
+X-API-Key: sk-alice-123
+```
+
+Every session is created under the caller's tenant; `list`, `get`, and all action
+endpoints only see that tenant. Cross-tenant access returns `404` (existence is
+not leaked). `GET /api/health` and `/api/docs*` stay public.
+
+## Docker
+
+The platform (API + Polyarb + Download Box) runs as a single image. The `chit/`
+JIT core is not required at runtime.
+
+```bash
+docker build -t chit-platform .
+docker run -p 3001:3001 -v "$PWD/data:/app/data" \
+  -e API_KEYS="alice=sk-alice-123" chit-platform
+```
+
+Or with compose:
+
+```bash
+API_KEYS="alice=sk-alice-123" docker compose up
+```
+
+## Example workflow
+
+```bash
+# start work
+SESSION=$(curl -s -X POST localhost:3001/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"totalSteps":5}' | jq -r .session.id)
+
+# schedule and pick up
+curl -s -X POST localhost:3001/api/sessions/$SESSION/queue
+curl -s -X POST localhost:3001/api/sessions/$SESSION/start
+
+# worker keeps reporting
+curl -s -X POST localhost:3001/api/sessions/$SESSION/heartbeat \
+  -H 'Content-Type: application/json' -d '{"step":2,"progress":0.4}'
+
+# crash, new worker resumes from last checkpoint
+curl -s localhost:3001/api/sessions/$SESSION | jq .session.checkpoints[-1]
+curl -s -X POST localhost:3001/api/sessions/$SESSION/resume
+curl -s -X POST localhost:3001/api/sessions/$SESSION/heartbeat
+
+# worker stalls; watchdog flags it, retry policy escalates after maxAttempts
+curl -s -X POST localhost:3001/api/sessions/$SESSION/retry
+
+# finish: complete (verifying), then finalize (done)
+curl -s -X POST localhost:3001/api/sessions/$SESSION/complete
+curl -s -X POST localhost:3001/api/sessions/$SESSION/finalize
+```
+
+## Download Box (real-world app)
+
+`src/downloadbox.ts` is a genuine use of the API, not a demo: a web UI + worker
+you run on any wall-powered machine (old laptop, Raspberry Pi, home server) so
+your phone never has to do the work. Paste a URL and the box downloads it in the
+background — with Range-based resume, so if the machine reboots, the network
+drops, or you pause it, the download continues from the exact byte where it
+stopped instead of restarting.
+
+```bash
+# Start the continue API (port 3001)
+npm run dev
+
+# In another terminal, start the download box (port 3000)
+npm run downloadbox
+```
+
+Open http://localhost:3000 — add a URL, watch live progress, and use
+Pause / Resume / Retry / Cancel. Completed files are served at
+`/downloads/files/<name>`.
+
+Environment variables: `PORT` (default 3000), `CONTINUE_BASE_URL` (default
+`http://127.0.0.1:3001`), `DOWNLOAD_DIR` (default `./downloads`).
+
+```bash
+# Simulate an interruption: pause at ~50%, then resume
+curl -X POST http://localhost:3000/downloads/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/file.iso","filename":"file.iso"}'
+# ... wait a bit, then:
+curl -X POST http://localhost:3000/downloads/jobs/<id>/pause
+curl -X POST http://localhost:3000/downloads/jobs/<id>/resume
+```
+
+With Docker Compose, the `downloadbox` service runs alongside the `continue`
+API and shares the `./downloads` volume.
+
+## Polyarb — Polymarket arbitrage bot
+
+`src/polyarb/` is a real-world bot (not an example) that scans Polymarket
+markets for arbitrage. It drives the whole scan from a Continue session, so an
+interrupted run resumes from its last checkpoint instead of re-scanning.
+
+Two modes:
+
+- **Simulator** (`--mode sim`): offline, seeded, and deterministic — ideal for
+  development and CI. It generates fake correlated markets and injects
+  mispricings, so you can watch the detector and executor work without network
+  or real money.
+- **Live** (`--mode live`): reads real markets from Polymarket's gamma API. A
+  live scan reports opportunities but does **not** trade.
+
+Detection runs on every iteration and logs anything above `--min-return`:
+
+- **Within-market**: a binary (or N-outcome) market whose outcome prices sum to
+  less than 1 — buying one of each outcome locks a risk-free profit.
+- **Cross-market**: the same question listed as separate markets (e.g. Yes and
+  No tokens split across two markets with the same event id) where the pair is
+  mispriced relative to each other.
+
+```bash
+# Sim mode: 8 scan iterations, seeded
+npm run polyarb -- --mode sim --iterations 8 --seed 42
+
+# Resume an interrupted scan from its last checkpoint
+npm run polyarb -- --mode sim --iterations 30 --session <session-id>
+
+# Live: scan real Polymarket markets (read-only, no orders)
+npm run polyarb -- --mode live --iterations 5
+```
+
+Every scan is a Continue session. Kill the process mid-run and re-run with the
+same `--session` — it continues from the last heartbeat instead of restarting.
+
+### Trading (experimental, on by choice)
+
+Executing opportunities requires the Polymarket CLOB and is **off by default**;
+the live executor is only touched when you pass `--trade`. It needs the CLOB
+credentials as environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `POLYMARKET_API_KEY` | CLOB API key (from the Polymarket dashboard) |
+| `POLYMARKET_SECRET` | CLOB API secret |
+| `POLYMARKET_PASSPHRASE` | CLOB API passphrase |
+| `POLYMARKET_FUNDER` | Address that funds the orders |
+| `POLYMARKET_CHAIN_ID` | Chain id, default `137` (Polygon) |
+
+```bash
+POLYMARKET_API_KEY=... POLYMARKET_SECRET=... POLYMARKET_PASSPHRASE=... \
+POLYMARKET_FUNDER=0x... npm run polyarb -- --mode live --trade --size 25
+```
+
+### Risk disclosures
+
+- **Markets move**: a spread that looks like arbitrage can vanish or invert
+  between scan and fill. Slippage and gas are not modeled in the simulator.
+- **Execution is not guaranteed**: resting orders on the CLOB may go unfilled;
+  the bot places single orders and does not chase or hedge.
+- **Checkpointed, not free**: the bot persists its scan progress, not an
+  always-on position. Always test in sim mode first and start with the smallest
+  sizes.
+
+## Examples
+
+Two runnable example apps in `examples/` show the API in action. Both default to
+`http://localhost:3001` (override with `CONTINUE_BASE_URL`) and hot-reload through
+the SDK.
+
+### Agent runner (`examples/agent`)
+
+A multi-step LLM agent workflow. Every step generates output that is saved as a
+checkpoint; interrupt it, then resume and it continues from the last completed
+step instead of restarting. Ships with a deterministic mock LLM — set
+`USER_LLM_API_KEY` (+ optional `USER_LLM_BASE_URL`, `USER_LLM_MODEL`) to use a real
+OpenAI-compatible endpoint.
+
+```bash
+# Run 4 steps, simulated crash after step 2 (session is left paused)
+npx tsx examples/agent/runner.ts --task "research brief" --steps 4 --crash-after 2
+
+# Continue that session from its last checkpoint
+npx tsx examples/agent/runner.ts --task "research brief" --steps 4 --session <id>
+```
+
+### File worker (`examples/fileworker`)
+
+A batch job that transforms every file in a directory into an output directory,
+tracking one file per step. Transient failures are recovered through the
+`stall -> retry -> active` loop; interrupting it (Ctrl+C via `--max-files`, or a
+real SIGINT) pauses the session and resume skips already-processed files.
+
+```bash
+# Process a directory, stopping after 1 file to simulate an interruption
+npx tsx examples/fileworker/worker.ts --input ./in --output ./out --max-files 1
+
+# Resume the interrupted batch, skipping completed files
+npx tsx examples/fileworker/worker.ts --input ./in --output ./out --session <id>
+
+# Inject a one-time failure for a file to watch the retry policy work
+npx tsx examples/fileworker/worker.ts --input ./in --output ./out --fail-on b.txt
+```
+
+## Client SDK
+
+A typed, dependency-free client (`src/client.ts`) is included:
+
+```ts
+import { ContinueClient } from './src/client.js';
+
+const client = new ContinueClient({ baseUrl: 'http://localhost:3001' });
+
+const session = await client.create({ totalSteps: 5, maxAttempts: 3 });
+await client.queue(session.id);
+await client.start(session.id);
+await client.heartbeat(session.id, { step: 2, progress: 0.4 });
+await client.pause(session.id);
+await client.resume(session.id);
+await client.complete(session.id);
+await client.finalize(session.id);
+```
+
+Every endpoint is a method: `create`, `get`, `list`, `queue`, `start`, `heartbeat`,
+`checkpoint`, `resume`, `retry`, `pause`, `stall`, `complete`, `finalize`, `cancel`,
+`fail`, `watchdog`, `metrics`, `health`. Pass a custom `fetchImpl` to swap in a
+mock transport.
+
+## Development
+
+```bash
+npm run dev        # tsx watch
+npm test           # vitest + supertest
+npm run typecheck  # tsc --noEmit
+npm run build      # tsc -> dist/
+```
+
+## Project layout
+
+```
+chit/              # JIT compiler core (Rust + C++, Python bindings)
+src/
+  types.ts    # Session, Checkpoint, 11 statuses, inputs
+  store.ts    # file-backed JSON store (atomic writes)
+  service.ts  # state machine, watchdog, retry policy, webhooks, metrics, pagination
+  routes.ts   # REST router
+  app.ts      # express app factory + auth + docs
+  server.ts   # entrypoint
+  client.ts   # typed ContinueClient SDK
+  auth.ts     # API-key auth middleware + tenant parsing
+  openapi.ts  # OpenAPI 3.0 spec
+  downloader.ts  # Range-resumable download engine
+  downloadbox.ts # web UI + worker (real-world download box)
+  polyarb/       # Polymarket arbitrage bot (engine, simulator, live client, executors, bot)
+examples/
+  common.ts          # shared CLI/session helpers
+  agent/             # LLM multi-step agent runner (resumable)
+  fileworker/        # batch file-processing worker (retry + pause/resume)
+test/
+  api.test.ts        # API integration tests
+  features.test.ts   # retry, webhooks, metrics, client SDK tests
+  platform.test.ts   # resume-from-checkpoint, pagination, auth, docs tests
+  examples.test.ts   # end-to-end tests driving the example apps
+  downloadbox.test.ts # end-to-end tests for the download box (resume via Range)
+  polyarb.test.ts    # detection engine, simulator, bot resume tests
+```

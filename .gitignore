@@ -177,6 +177,7 @@
 
 # Continue Protocol
 **/data/
+dist/
 
 # Chit core (vendored JIT compiler) — keep its tracked build inputs
 !chit/rust/Cargo.lock
