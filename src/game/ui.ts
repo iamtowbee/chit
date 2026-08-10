@@ -193,16 +193,18 @@ export const GAME_UI = `<!doctype html>
       }
 
       function badge(status, outcome) {
-        if (outcome === 'win') return '<span class="badge done">legend</span>';
-        if (outcome === 'lose') return '<span class="badge cancelled">ended</span>';
-        if (status === 'paused' || status === 'stalled') return '<span class="badge playing">paused</span>';
-        return '<span class="badge playing">playing</span>';
+        if (outcome === 'win') return { cls: 'done', label: 'legend' };
+        if (outcome === 'lose') return { cls: 'cancelled', label: 'ended' };
+        if (status === 'paused' || status === 'stalled') return { cls: 'playing', label: 'paused' };
+        return { cls: 'playing', label: 'playing' };
       }
 
       function renderGame(g) {
         current = g;
         ended = g.outcome !== null;
-        $('playStatus').outerHTML = badge(g.status, g.outcome);
+        const b = badge(g.status, g.outcome);
+        $('playStatus').className = 'badge ' + b.cls;
+        $('playStatus').textContent = b.label;
         $('playId').textContent = g.id.slice(0, 8) + '…';
         $('playMoves').textContent = 'move ' + g.moves;
         $('bar').querySelector('div').style.width = Math.round(g.progress * 100) + '%';
