@@ -6,6 +6,8 @@ import { AgentController } from './agent/controller.js';
 import { createApiKeyAuth, parseApiKeys } from './auth.js';
 import { ContinueClient } from './client.js';
 import { HttpError } from './errors.js';
+import { GameController } from './game/controller.js';
+import { GAME_UI } from './game/ui.js';
 import { OPENAPI } from './openapi.js';
 import { createRouter } from './routes.js';
 import { SessionService } from './service.js';
@@ -25,6 +27,7 @@ export interface PlatformHandle {
   service: SessionService;
   store: JsonFileStore;
   agent: AgentController;
+  game: GameController;
   port: number;
 }
 
@@ -49,6 +52,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
   const client = new ContinueClient({ baseUrl, apiKey: firstKey });
 
   const agent = new AgentController(client, downloadDir);
+  const game = new GameController(client);
 
   const app = express();
   app.disable('x-powered-by');
@@ -57,6 +61,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
   if (keys.size > 0) {
     app.use('/api', createApiKeyAuth(keys));
     app.use('/agent', createApiKeyAuth(keys));
+    app.use('/game', createApiKeyAuth(keys));
   }
 
   app.use('/api', createRouter(service));
@@ -85,6 +90,12 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
 
   app.use('/agent', agent.router());
 
+  app.get('/cak', (_req: Request, res: Response) => {
+    res.type('html').send(GAME_UI);
+  });
+
+  app.use('/game', game.router());
+
   app.get('/files/:name', (req: Request, res: Response, next: NextFunction) => {
     const name = sanitizeFilename(req.params.name!);
     res.sendFile(path.join(downloadDir, name), (err) => {
@@ -112,7 +123,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
     res.status(500).json({ error: message });
   });
 
-  return { app, service, store, agent, port };
+  return { app, service, store, agent, game, port };
 }
 
 function sanitizeFilename(name: string): string {

@@ -300,7 +300,8 @@ export class SessionService {
     for (const session of await this.store.all()) {
       if (
         !WATCHDOG_ELIGIBLE.has(session.status) ||
-        session.lastHeartbeatAt === null
+        session.lastHeartbeatAt === null ||
+        session.metadata.app === 'game'
       ) {
         continue;
       }

@@ -140,6 +140,7 @@ export const PLATFORM_UI = `<!doctype html>
       </div>
       <div class="head-actions">
         <span class="pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting&hellip;</span></span>
+        <span class="pill"><a href="/cak">Play It&rsquo;s Cak</a></span>
         <span class="pill"><a href="/api/docs/html" target="_blank">API docs</a></span>
       </div>
     </header>
@@ -213,7 +214,7 @@ export const PLATFORM_UI = `<!doctype html>
     </main>
 
     <footer>
-      <span>One agent &middot; one session &middot; resume from the exact byte or iteration.</span>
+      <span>One agent &middot; one session &middot; resume from the exact byte or iteration. &middot; <a href="/cak">Play It&rsquo;s Cak</a></span>
       <span class="mono">GET /agent/runs &middot; POST /agent/runs/:id/stop</span>
     </footer>
 
