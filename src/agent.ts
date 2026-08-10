@@ -2,10 +2,10 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { ContinueClient } from './client.js';
 import { downloadRange, StopError } from './downloader.js';
-import { engine } from './polyarb/engine.js';
-import { HttpPolyClient } from './polyarb/polyclient.js';
-import { Simulator } from './polyarb/simulator.js';
-import type { Market, Opportunity } from './polyarb/types.js';
+import { engine } from './ollyba/engine.js';
+import { HttpPolyClient } from './ollyba/polyclient.js';
+import { Simulator } from './ollyba/simulator.js';
+import type { Market, Opportunity } from './ollyba/types.js';
 import type { Session } from './types.js';
 
 export type AgentStage = 'download' | 'scan' | 'done';
@@ -49,7 +49,7 @@ const MAX_CHUNK_RETRIES = 5;
 /**
  * The one feature: a Chit Agent. One Continue session drives three stages —
  * 1. download market/data files (Range engine), 2. scan them for arbitrage
- * (polyarb engine), 3. report. Interrupting resumes from the exact byte or
+ * (ollyba engine), 3. report. Interrupting resumes from the exact byte or
  * iteration, because every heartbeat is a checkpoint on the same session.
  */
 export async function runAgent(options: {

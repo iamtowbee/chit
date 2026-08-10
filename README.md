@@ -18,7 +18,7 @@ chit/                 JIT compiler core (Rust + C++, Python bindings)
 src/                  Continue Protocol runtime (TypeScript API + persistence)
 src/agent.ts          the single agent: download -> scan -> report in one session
 src/agent/controller.ts  /agent/runs HTTP controller + run registry
-src/polyarb/          Polyarb — Polymarket arbitrage engine + bot (used by the agent)
+src/ollyba/          Ollyba — Polymarket arbitrage engine + bot (used by the agent)
 src/downloader.ts     Range-resumable download engine
 src/downloadbox.ts    standalone Download Box web UI + worker (optional)
 examples/             Runnable example apps on the runtime
@@ -205,7 +205,7 @@ POST /api/sessions/:id/heartbeat
 ## Trading agent (`/agent`)
 
 The agent is the one product: given a data-source URL it downloads the file
-(Range engine), scans it for arbitrage (polyarb engine), and reports — all in a
+(Range engine), scans it for arbitrage (ollyba engine), and reports — all in a
 single Continue session. Each run lives in the platform's run registry and maps
 to one session, so interrupting and resuming continues from the exact byte or
 iteration.
@@ -354,9 +354,9 @@ curl -X POST http://localhost:3000/downloads/jobs/<id>/pause
 curl -X POST http://localhost:3000/downloads/jobs/<id>/resume
 ```
 
-## Polyarb — Polymarket arbitrage bot
+## Ollyba — Polymarket arbitrage bot
 
-`src/polyarb/` is a real-world bot (not an example) that scans Polymarket
+`src/ollyba/` is a real-world bot (not an example) that scans Polymarket
 markets for arbitrage. It drives the whole scan from a Continue session, so an
 interrupted run resumes from its last checkpoint instead of re-scanning.
 
@@ -379,13 +379,13 @@ Detection runs on every iteration and logs anything above `--min-return`:
 
 ```bash
 # Sim mode: 8 scan iterations, seeded
-npm run polyarb -- --mode sim --iterations 8 --seed 42
+npm run ollyba -- --mode sim --iterations 8 --seed 42
 
 # Resume an interrupted scan from its last checkpoint
-npm run polyarb -- --mode sim --iterations 30 --session <session-id>
+npm run ollyba -- --mode sim --iterations 30 --session <session-id>
 
 # Live: scan real Polymarket markets (read-only, no orders)
-npm run polyarb -- --mode live --iterations 5
+npm run ollyba -- --mode live --iterations 5
 ```
 
 Every scan is a Continue session. Kill the process mid-run and re-run with the
@@ -413,7 +413,7 @@ credentials as environment variables:
 
 ```bash
 POLYMARKET_API_KEY=... POLYMARKET_SECRET=... POLYMARKET_PASSPHRASE=... \
-POLYMARKET_FUNDER=0x... npm run polyarb -- --mode live --trade --size 25
+POLYMARKET_FUNDER=0x... npm run ollyba -- --mode live --trade --size 25
 ```
 
 ### Risk disclosures
@@ -496,7 +496,7 @@ mock transport.
 npm run platform   # the one app on :3001 — API + trading agent + dashboard
 npm run dev        # API-only, tsx watch
 npm run downloadbox # box standalone on :3000
-npm run polyarb    # polyarb CLI bot
+npm run ollyba    # ollyba CLI bot
 npm test           # vitest + supertest
 npm run typecheck  # tsc --noEmit
 npm run build      # tsc -> dist/
@@ -522,7 +522,7 @@ src/
   openapi.ts  # OpenAPI 3.0 spec
   downloader.ts  # Range-resumable download engine
   downloadbox.ts # standalone web UI + worker (optional)
-  polyarb/       # Polymarket arbitrage engine, simulator, live client, executors, bot
+  ollyba/       # Polymarket arbitrage engine, simulator, live client, executors, bot
 examples/
   common.ts          # shared CLI/session helpers
   agent/             # LLM multi-step agent runner (resumable)
@@ -533,7 +533,7 @@ test/
   platform.test.ts   # resume-from-checkpoint, pagination, auth, docs tests
   examples.test.ts   # end-to-end tests driving the example apps
   downloadbox.test.ts # end-to-end tests for the download box (resume via Range)
-  polyarb.test.ts    # detection engine, simulator, bot resume tests
+  ollyba.test.ts    # detection engine, simulator, bot resume tests
   agent.test.ts      # agent unit tests: download -> scan -> done, resume, parseSnapshot
   store.test.ts      # sharded persistence, write coalescing, legacy migration
   platform-integrated.test.ts # the one app: agent runs, stop/resume, files, auth

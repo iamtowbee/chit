@@ -7,12 +7,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { ContinueClient } from '../src/client.js';
 import { JsonFileStore } from '../src/store.js';
-import { engine } from '../src/polyarb/engine.js';
-import { HttpPolyClient } from '../src/polyarb/polyclient.js';
-import { runPolyarb } from '../src/polyarb/bot.js';
-import { SimExecutor } from '../src/polyarb/execute.js';
-import { Simulator } from '../src/polyarb/simulator.js';
-import type { Market } from '../src/polyarb/types.js';
+import { engine } from '../src/ollyba/engine.js';
+import { HttpPolyClient } from '../src/ollyba/polyclient.js';
+import { runOllyba } from '../src/ollyba/bot.js';
+import { SimExecutor } from '../src/ollyba/execute.js';
+import { Simulator } from '../src/ollyba/simulator.js';
+import type { Market } from '../src/ollyba/types.js';
 
 describe('arbitrage engine', () => {
   it('detects within-market arbitrage (binary)', () => {
@@ -145,7 +145,7 @@ describe('bot on the continue API', () => {
   let store: JsonFileStore;
 
   beforeEach(async () => {
-    dataDir = await mkdtemp(path.join(os.tmpdir(), 'continue-polyarb-'));
+    dataDir = await mkdtemp(path.join(os.tmpdir(), 'continue-ollyba-'));
     store = new JsonFileStore(dataDir);
     const { app } = createApp({ store });
     apiServer = http.createServer(app);
@@ -163,7 +163,7 @@ describe('bot on the continue API', () => {
   });
 
   it('runs a scan session to completion with checkpoints', async () => {
-    const { session, found } = await runPolyarb({
+    const { session, found } = await runOllyba({
       client,
       mode: 'sim',
       iterations: 3,
@@ -175,13 +175,13 @@ describe('bot on the continue API', () => {
     expect(session.currentStep).toBe(3);
     expect(session.checkpoints).toHaveLength(3);
     expect(found).toBeGreaterThan(0);
-    expect(session.metadata.app).toBe('polyarb');
+    expect(session.metadata.app).toBe('ollyba');
   });
 
   it('resumes from the last checkpoint after an interruption', async () => {
     let firstError: unknown;
     try {
-      await runPolyarb({
+      await runOllyba({
         client,
         mode: 'sim',
         iterations: 5,
@@ -201,7 +201,7 @@ describe('bot on the continue API', () => {
     expect(session.status).toBe('active');
     expect(session.currentStep).toBe(3);
 
-    const { session: resumed } = await runPolyarb({
+    const { session: resumed } = await runOllyba({
       client,
       mode: 'sim',
       iterations: 5,

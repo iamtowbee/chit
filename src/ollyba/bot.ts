@@ -7,7 +7,7 @@ import { HttpPolyClient, type MarketDataSource } from './polyclient.js';
 import { Simulator } from './simulator.js';
 import type { Opportunity } from './types.js';
 
-export interface PolyarbOptions {
+export interface OllybaOptions {
   client: ContinueClient;
   mode: 'sim' | 'live';
   iterations: number;
@@ -26,7 +26,7 @@ export interface PolyarbOptions {
   onFound?: (iteration: number, opportunities: Opportunity[]) => void;
 }
 
-export interface PolyarbRun {
+export interface OllybaRun {
   session: Session;
   found: number;
 }
@@ -36,7 +36,7 @@ export interface PolyarbRun {
  * iteration is a heartbeat checkpoint, so interrupting and re-running with
  * `--session <id>` continues from the exact iteration it stopped at.
  */
-export async function runPolyarb(options: PolyarbOptions): Promise<PolyarbRun> {
+export async function runOllyba(options: OllybaOptions): Promise<OllybaRun> {
   const log = options.log ?? (() => undefined);
   const dataSource = createDataSource(options);
   const executor =
@@ -51,7 +51,7 @@ export async function runPolyarb(options: PolyarbOptions): Promise<PolyarbRun> {
     ? await options.client.get(options.sessionId)
     : await options.client.create({
         metadata: {
-          app: 'polyarb',
+          app: "ollyba",
           mode: options.mode,
           minReturn: options.minReturn,
           trade: Boolean(options.trade),
@@ -125,7 +125,7 @@ export async function runPolyarb(options: PolyarbOptions): Promise<PolyarbRun> {
   return { session, found };
 }
 
-function createDataSource(options: PolyarbOptions): MarketDataSource {
+function createDataSource(options: OllybaOptions): MarketDataSource {
   if (options.mode === 'live') {
     return new HttpPolyClient();
   }
@@ -210,7 +210,7 @@ async function main(): Promise<void> {
   const { ContinueClient } = await import('../client.js');
   const client = new ContinueClient({ baseUrl });
 
-  const { session, found } = await runPolyarb({
+  const { session, found } = await runOllyba({
     client,
     mode,
     iterations,
@@ -220,7 +220,7 @@ async function main(): Promise<void> {
     trade,
     size,
     sessionId,
-    log: (message) => console.log(`[polyarb] ${message}`),
+    log: (message) => console.log(`[ollyba] ${message}`),
   });
 
   console.log(

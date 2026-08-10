@@ -9,7 +9,7 @@
     "start": "node dist/platform.js",
     "platform": "tsx src/platform.ts",
     "downloadbox": "tsx src/downloadbox.ts",
-    "polyarb": "tsx src/polyarb/bot.ts",
+    "ollyba": "tsx src/ollyba/bot.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "typecheck:examples": "tsc -p tsconfig.examples.json",

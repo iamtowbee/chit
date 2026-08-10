@@ -6,7 +6,7 @@ import express, {
 } from 'express';
 import { ContinueClient } from '../client.js';
 import { HttpError } from '../errors.js';
-import { runPolyarb, type PolyarbOptions } from './bot.js';
+import { runOllyba, type OllybaOptions } from './bot.js';
 import type { Opportunity } from './types.js';
 
 export interface ScanStartInput {
@@ -35,12 +35,12 @@ export interface ScanRecord {
 }
 
 /**
- * Manages Polyarb scans inside the unified platform: each scan runs the
+ * Manages Ollyba scans: each scan runs the
  * Continue-session-driven bot (so it is checkpointed and resumable), while the
  * controller keeps an in-memory registry of active and finished scans for the
  * UI and REST endpoints.
  */
-export class PolyarbController {
+export class OllybaController {
   private readonly scans = new Map<string, ScanRecord>();
   private readonly log: (message: string) => void;
 
@@ -64,7 +64,7 @@ export class PolyarbController {
       (
         await this.client.create({
           metadata: {
-            app: 'polyarb',
+            app: "ollyba",
             mode: input.mode,
             iterations: input.iterations,
             minReturn: input.minReturn ?? 0.005,
@@ -83,7 +83,7 @@ export class PolyarbController {
     };
     this.scans.set(id, record);
 
-    const options: PolyarbOptions = {
+    const options: OllybaOptions = {
       client: this.client,
       mode: input.mode,
       iterations: input.iterations,
@@ -91,7 +91,7 @@ export class PolyarbController {
       minReturn: input.minReturn ?? 0.005,
       trade: Boolean(input.trade),
       size: input.size ?? 100,
-      log: (message) => this.log(`[polyarb ${id}] ${message}`),
+      log: (message) => this.log(`[ollyba ${id}] ${message}`),
       onFound: (_iteration: number, opportunities: Opportunity[]) => {
         record.found += opportunities.length;
       },
@@ -99,12 +99,12 @@ export class PolyarbController {
     if (input.seed !== undefined) options.seed = input.seed;
     options.sessionId = sessionId;
 
-    runPolyarb(options)
+    runOllyba(options)
       .then((result) => {
         record.sessionId = result.session.id;
         record.status = 'done';
         record.finishedAt = new Date().toISOString();
-        this.log(`[polyarb ${id}] done — ${result.found} opportunities`);
+        this.log(`[ollyba ${id}] done — ${result.found} opportunities`);
       })
       .catch((err: unknown) => {
         if (record.status === 'stopped') {
@@ -114,7 +114,7 @@ export class PolyarbController {
         record.status = 'error';
         record.error = err instanceof Error ? err.message : String(err);
         record.finishedAt = new Date().toISOString();
-        this.log(`[polyarb ${id}] error — ${record.error}`);
+        this.log(`[ollyba ${id}] error — ${record.error}`);
       });
 
     return record;
