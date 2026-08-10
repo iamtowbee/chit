@@ -2,7 +2,7 @@ export const GAME_UI = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>It's Cak — a text game baked on the live market</title>
     <style>
       :root {
@@ -14,14 +14,18 @@ export const GAME_UI = `<!doctype html>
         --red: #d1665c;
         --line: #2a241b;
       }
+      html { -webkit-text-size-adjust: 100%; }
       * { box-sizing: border-box; }
       body {
         margin: 0;
         background: var(--bg);
         color: var(--fg);
         font: 16px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        touch-action: manipulation;
       }
-      #app { max-width: 780px; margin: 0 auto; padding: 28px 20px 90px; }
+      button, input { font: inherit; }
+      button { touch-action: manipulation; }
+      #app { max-width: 780px; margin: 0 auto; padding: 28px 20px 110px; }
       a { color: var(--gold); }
       .muted { color: var(--dim); }
       .mono { font-family: inherit; }
@@ -134,28 +138,36 @@ export const GAME_UI = `<!doctype html>
         border: none;
         color: var(--green);
         font: inherit;
-        padding: 3px 0;
+        padding: 6px 0;
+        min-height: 44px;
         cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
       }
       .choice:hover { color: var(--gold); }
 
-      .row { margin-top: 14px; display: flex; gap: 10px; }
+      .row { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
 
       .prompt {
+        position: sticky;
+        bottom: 0;
+        z-index: 3;
         display: flex;
         gap: 10px;
         align-items: center;
+        background: var(--bg);
         border-top: 1px solid var(--line);
-        padding-top: 10px;
+        padding: 12px 0 calc(12px + env(safe-area-inset-bottom, 0px));
         margin-top: 8px;
       }
       .prompt .caret { color: var(--gold); font-weight: 700; }
       .prompt input {
         flex: 1;
+        min-width: 0;
         background: none;
         border: none;
         color: var(--fg);
         font: inherit;
+        font-size: 16px;
         outline: none;
       }
       .prompt .cursor {
@@ -178,6 +190,20 @@ export const GAME_UI = `<!doctype html>
 
       @keyframes blink { 50% { opacity: 0; } }
       @keyframes rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+      @media (max-width: 640px) {
+        body { font-size: 15px; }
+        #app { padding: 18px 14px 130px; }
+        .home .ascii { font-size: 9px; }
+        .menu .item { min-height: 44px; }
+        .tbar { gap: 8px; flex-wrap: wrap; padding: 8px 0; }
+        .tbar .prog { display: none; }
+        .srow { flex-wrap: wrap; gap: 6px 10px; padding: 8px 0; }
+        .srow .loc { flex: 1 1 100%; }
+        .srow button, .row button { padding: 8px 12px; }
+        .choice { padding: 8px 0; }
+        .prompt { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+      }
     </style>
   </head>
   <body>
