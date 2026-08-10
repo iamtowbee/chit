@@ -39,6 +39,24 @@ import {
   type CryptoHistoryEntry,
 } from './crypto.js';
 import {
+  MILLION_AUDIENCE,
+  MILLION_FIFTY,
+  MILLION_PHONE,
+  MILLION_ROUNDS,
+  MILLION_TIERS,
+  MILLION_WALK,
+  initialMillionGame,
+  isMillionBake,
+  isMillionGame,
+  millionProgress,
+  resolveMillionPlay,
+  safeFloorAt,
+  tierAt,
+  type MillionGameData,
+  type MillionHint,
+  type MillionHistoryEntry,
+} from './million.js';
+import {
   GAME_NAME,
   GAME_TAGLINE,
   ITEM_NAMES,
@@ -47,7 +65,7 @@ import {
 } from './story.js';
 
 export interface GameCreateInput {
-  kind?: 'story' | 'market' | 'crypto';
+  kind?: 'story' | 'market' | 'crypto' | 'million';
   mode?: 'sim' | 'file' | 'live';
   sourceUrl?: string;
   filename?: string;
@@ -102,10 +120,30 @@ export interface CryptoView {
   name: string | null;
 }
 
+export interface MillionView {
+  round: number;
+  rounds: number;
+  phase: 'play' | 'bake' | 'end';
+  bank: number;
+  safeFloor: number;
+  playingFor: number | null;
+  question: { prompt: string; options: string[] } | null;
+  lives: { fifty: boolean; phone: boolean; audience: boolean };
+  hint: MillionHint | null;
+  corrects: number;
+  wrongs: number;
+  walks: number;
+  decisions: number;
+  history: MillionHistoryEntry[];
+  won: number;
+  ending: string | null;
+  name: string | null;
+}
+
 export interface GameView {
   id: string;
   status: SessionStatus;
-  kind: 'story' | 'market' | 'crypto';
+  kind: 'story' | 'market' | 'crypto' | 'million';
   title: string;
   tagline: string;
   nodeId: string;
@@ -121,12 +159,13 @@ export interface GameView {
   checkpoints: number;
   market?: MarketView;
   crypto?: CryptoView;
+  million?: MillionView;
 }
 
 export interface GameSummary {
   id: string;
   status: SessionStatus;
-  kind: 'story' | 'market' | 'crypto';
+  kind: 'story' | 'market' | 'crypto' | 'million';
   createdAt: string;
   updatedAt: string;
   moves: number;
@@ -164,6 +203,9 @@ export class GameController {
     }
     if (input.kind === 'crypto') {
       return this.createCrypto(input);
+    }
+    if (input.kind === 'million') {
+      return this.createMillion(input);
     }
     const session = await this.client.create({
       metadata: { app: 'game', kind: 'story', title: GAME_NAME },
@@ -238,8 +280,32 @@ export class GameController {
     return this.view(session.id);
   }
 
+  private async createMillion(input: GameCreateInput): Promise<GameView> {
+    const seed = Number.isInteger(input.seed) && (input.seed as number) >= 0
+      ? (input.seed as number)
+      : 1;
+    const state = initialMillionGame({ seed });
+    const session = await this.client.create({
+      metadata: {
+        app: 'game',
+        kind: 'million',
+        mode: 'trivia',
+        source: 'question bank',
+      },
+      totalSteps: MILLION_ROUNDS,
+      data: state,
+    });
+    await this.client.queue(session.id);
+    await this.client.start(session.id);
+    await this.client.checkpoint(session.id, { step: 0, progress: 0 });
+    return this.view(session.id);
+  }
+
   async view(id: string): Promise<GameView> {
     const session = await this.client.get(id);
+    if (isMillionGame(session.data)) {
+      return this.millionView(session, session.data);
+    }
     if (isCryptoGame(session.data)) {
       return this.cryptoView(session, session.data);
     }
@@ -279,6 +345,9 @@ export class GameController {
   async act(id: string, choiceIndex: number): Promise<GameView> {
     const session = await this.client.get(id);
     const data = session.data;
+    if (isMillionGame(data)) {
+      return this.actMillion(session, data, choiceIndex);
+    }
     if (isCryptoGame(data)) {
       return this.actCrypto(session, data, choiceIndex);
     }
@@ -299,6 +368,26 @@ export class GameController {
       await this.client.finalize(id);
     }
     return this.view(id);
+  }
+
+  private async actMillion(
+    session: Session,
+    data: MillionGameData,
+    choiceIndex: number,
+  ): Promise<GameView> {
+    if (data.outcome !== null) {
+      throw new HttpError(409, 'this game has already ended');
+    }
+    if (IDLE_STATUSES.has(session.status)) {
+      await this.client.resume(session.id);
+    }
+    const next = resolveMillionPlay(data, choiceIndex);
+    await this.checkpoint(session.id, next.decisions, millionProgress(next), next);
+    if (next.outcome !== null) {
+      await this.client.complete(session.id, next);
+      await this.client.finalize(session.id);
+    }
+    return this.view(session.id);
   }
 
   private async actMarket(
@@ -566,8 +655,104 @@ export class GameController {
     };
   }
 
+  private millionView(session: Session, data: MillionGameData): GameView {
+    const bake = isMillionBake(data);
+    const ended = data.outcome !== null;
+    const question = ended || bake ? null : data.questions[data.round] ?? null;
+    const playingFor = question ? tierAt(data.round) : null;
+    let title: string;
+    let text: string;
+    let choices: GameChoiceView[] = [];
+    if (ended) {
+      title = data.ending === 'grand' ? 'The Grand Bake' : data.ending === 'walk' ? 'Walking away' : 'The buzzer rings';
+      text = millionEndingText(data);
+    } else if (bake) {
+      title = 'The Grand Bake';
+      text =
+        'The Ovenlight rises. Fifteen questions, fifteen right answers, and the million is yours. ' +
+        'Cak, choose the name that will be told across the ovenlands.';
+      choices = BAKE_NAMES.map((name, index) => ({ index, label: `Name yourself ${name}` }));
+    } else if (question) {
+      title = question.prompt;
+      text =
+        'The hot seat glows. For $' +
+        playingFor!.toFixed(0) +
+        ', ' +
+        question.prompt +
+        ' The safe floor is $' +
+        data.safeFloor.toFixed(0) +
+        ' if the buzzer catches you.';
+      choices = question.options.map((option, index) => ({ index, label: option }));
+      if (!data.lives.fifty && question.options.length > 2) {
+        choices.push({ index: MILLION_FIFTY, label: '50/50 — remove two wrong answers' });
+      }
+      if (!data.lives.phone) {
+        choices.push({ index: MILLION_PHONE, label: 'Phone a friend' });
+      }
+      if (!data.lives.audience) {
+        choices.push({ index: MILLION_AUDIENCE, label: 'Ask the audience' });
+      }
+      choices.push({ index: MILLION_WALK, label: `Walk away with $${data.bank.toFixed(0)}` });
+    } else {
+      title = 'The studio is empty';
+      text = 'No question is on the board right now.';
+    }
+
+    return {
+      id: session.id,
+      status: session.status,
+      kind: 'million',
+      title: GAME_NAME,
+      tagline: 'Played on the hot seat — fifteen questions, chase the million.',
+      nodeId: question ? 'q' + (data.round + 1) : 'million',
+      nodeTitle: title,
+      text,
+      choices,
+      inventory: [],
+      flags: {},
+      moves: data.decisions,
+      progress: millionProgress(data),
+      visitedCount: data.decisions,
+      outcome: data.outcome,
+      checkpoints: session.checkpoints.length,
+      million: {
+        round: data.round,
+        rounds: MILLION_ROUNDS,
+        phase: ended ? 'end' : bake ? 'bake' : 'play',
+        bank: data.bank,
+        safeFloor: data.safeFloor,
+        playingFor,
+        question: question ? { prompt: question.prompt, options: question.options } : null,
+        lives: { ...data.lives },
+        hint: data.hint,
+        corrects: data.corrects,
+        wrongs: data.wrongs,
+        walks: data.walks,
+        decisions: data.decisions,
+        history: data.history,
+        won: data.won,
+        ending: data.ending,
+        name: data.name,
+      },
+    };
+  }
+
   private summary(session: Session): GameSummary {
     const data = session.data;
+    if (isMillionGame(data)) {
+      const question = data.questions[data.round];
+      return {
+        id: session.id,
+        status: session.status,
+        kind: 'million',
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        moves: data.decisions,
+        outcome: data.outcome,
+        nodeTitle: question ? question.prompt : 'the Grand Bake',
+        progress: millionProgress(data),
+      };
+    }
     if (isCryptoGame(data)) {
       const window = data.coin;
       return {
@@ -623,7 +808,7 @@ export class GameController {
     router.post('/new', async (req: Request, res: Response, next: NextFunction) => {
       try {
         const body = (req.body ?? {}) as Partial<GameCreateInput>;
-        const kind = body.kind === 'market' ? 'market' : body.kind === 'crypto' ? 'crypto' : 'story';
+        const kind = body.kind === 'market' ? 'market' : body.kind === 'crypto' ? 'crypto' : body.kind === 'million' ? 'million' : 'story';
         const game = await this.create({
           kind,
           mode: body.mode,
@@ -769,6 +954,40 @@ function cryptoEndingText(data: CryptoGameData): string {
     data.purse.toFixed(2) +
     ' frostings — not enough for the Grand Bake. ' +
     'Cak learned the ticker but not the nerve. The market will be open again at first light.'
+  );
+}
+
+function millionEndingText(data: MillionGameData): string {
+  if (data.ending === 'grand') {
+    return (
+      'The Great Oven opens its door to you, ' +
+      (data.name ?? 'Cak') +
+      '. Fifteen questions, fifteen right answers, and a million frostings in the vault. ' +
+      'Cak chose the answer, and the answer chose Cak.'
+    );
+  }
+  if (data.ending === 'walk') {
+    if (data.won > 0) {
+      return (
+        'Cak steps out of the hot seat, cashing ' +
+        data.won.toFixed(0) +
+        ' frostings. The million stays unclaimed, but a baker who walks away whole is a baker who bakes another day.'
+      );
+    }
+    return 'Cak leaves the hot seat before the first question — pockets empty, but head held high. The million can wait.';
+  }
+  if (data.ending === 'broke') {
+    return (
+      'The buzzer rings before the first safe haven. Cak leaves with nothing but the question ringing in the ears, ' +
+      'and the resolve to study the ovenlands by heart.'
+    );
+  }
+  return (
+    'The buzzer rings. Cak drops to the safe floor of ' +
+    data.won.toFixed(0) +
+    ' frostings — ' +
+    (data.won >= 32000 ? 'enough to rebuild and return.' : 'a humble nest egg for the road ahead.') +
+    ' The Grand Bake waits for a sharper mind.'
   );
 }
 

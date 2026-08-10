@@ -236,10 +236,17 @@ export const GAME_UI = `<!doctype html>
             <label class="check"><input id="cryptoLive" type="checkbox" /> use live CoinGecko prices</label>
             <button class="item" id="beginCryptoGo">begin trading</button>
           </div>
+          <button class="item" id="beginMillionToggle">4. answer the millionaire questions</button>
+          <div id="millionForm" class="market-form" style="display:none">
+            <label>seed (optional)
+              <input id="millionSeed" type="number" placeholder="a number" />
+            </label>
+            <button class="item" id="beginMillionGo">take the hot seat</button>
+          </div>
           <button class="item dim" id="helpItem">?. help</button>
         </div>
         <div id="hintBox" class="hint" style="display:none">
-          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span>, or for crypto <span class="mono">buy</span>/<span class="mono">sell</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
+          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span>, or for crypto <span class="mono">buy</span>/<span class="mono">sell</span>, or for trivia <span class="mono">fifty</span>, <span class="mono">phone</span>, <span class="mono">audience</span>, <span class="mono">walk</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
         </div>
         <div id="saved" class="saved">
           <h3>saved games</h3>
@@ -328,6 +335,8 @@ export const GAME_UI = `<!doctype html>
               body = JSON.stringify({ kind: 'market', seed: Number($('mktSeed').value) || undefined });
             } else if (g.kind === 'crypto') {
               body = JSON.stringify({ kind: 'crypto', seed: Number($('cryptoSeed').value) || undefined, mode: $('cryptoLive') && $('cryptoLive').checked ? 'live' : 'sim' });
+            } else if (g.kind === 'million') {
+              body = JSON.stringify({ kind: 'million', seed: Number($('millionSeed').value) || undefined });
             }
             var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body });
             localStorage.setItem(KEY, d.game.id);
@@ -419,6 +428,50 @@ export const GAME_UI = `<!doctype html>
         if (!g.outcome) choices(g);
       }
 
+      function renderMillion(g) {
+        var m = g.million;
+        line('question ' + (m.phase !== 'end' ? m.round + 1 : m.round) + ' of ' + m.rounds, 'muted');
+        var floorNote = m.safeFloor > 0 ? '   (safe floor $' + fmt(m.safeFloor) + ')' : '';
+        line('bank  $' + fmt(m.bank) + (m.playingFor !== null ? '   playing for $' + fmt(m.playingFor) : '') + floorNote, 'purse');
+        if (!g.outcome && m.phase === 'play' && m.question) {
+          line(g.text, 'prose');
+          var lives = [];
+          lives.push(m.lives.fifty ? '50/50 used' : '50/50');
+          lives.push(m.lives.phone ? 'phone used' : 'phone a friend');
+          lives.push(m.lives.audience ? 'audience used' : 'ask the audience');
+          line('lives: ' + lives.join('   '), 'plate');
+          if (m.hint) {
+            line(m.hint.text, m.hint.kind === 'fifty' ? 'win' : 'plate');
+          }
+        } else if (!g.outcome && m.phase === 'bake') {
+          line(g.text, 'prose');
+        } else {
+          var win = g.outcome === 'win';
+          line('--------------------------------------------', 'rule');
+          line(win ? 'the grand bake is won' : 'the hot seat dims', win ? 'win' : 'lose');
+          line(g.text, 'prose');
+          line('right ' + m.corrects + '   wrong ' + m.wrongs + '   walks ' + m.walks + '   won $' + fmt(m.won), 'plate');
+          if (m.ending === 'grand' && m.name) line('the legend of ' + m.name + ' is told across the ovenlands', 'win');
+          line('press r to take the hot seat again, or n for saved games', 'muted');
+          terminalButtons(g);
+        }
+        var hist = m.history || [];
+        for (var i = lastHist; i < hist.length; i += 1) {
+          var h3 = hist[i];
+          if (h3.action === 'Correct') {
+            line('  Q' + h3.round + '. correct — ' + h3.answer + '   +$' + fmt(h3.tier) + ' &rarr; bank $' + fmt(h3.bankAfter), 'win');
+          } else if (h3.action === 'Wrong') {
+            line('  Q' + h3.round + '. wrong — ' + h3.answer + '   drops to $' + fmt(h3.bankAfter), 'lose');
+          } else if (h3.action === 'Walked') {
+            line('  Q' + h3.round + '. walked away with $' + fmt(h3.bankAfter), 'purse');
+          } else {
+            line('  Q' + h3.round + '. used ' + h3.action.toLowerCase(), 'plate');
+          }
+        }
+        lastHist = Math.max(lastHist, hist.length);
+        if (!g.outcome) choices(g);
+      }
+
       function renderGame(g, keep) {
         current = g;
         ended = g.outcome !== null;
@@ -432,6 +485,9 @@ export const GAME_UI = `<!doctype html>
         } else if (g.kind === 'crypto') {
           var c = g.crypto;
           $('playMoves').textContent = 'round ' + (c.phase !== 'end' ? c.round + 1 : c.round) + '/' + c.rounds;
+        } else if (g.kind === 'million') {
+          var mi = g.million;
+          $('playMoves').textContent = 'q ' + (mi.phase !== 'end' ? mi.round + 1 : mi.round) + '/' + mi.rounds;
         } else {
           $('playMoves').textContent = 'move ' + g.moves;
         }
@@ -443,6 +499,7 @@ export const GAME_UI = `<!doctype html>
         }
         if (g.kind === 'market') { renderMarket(g); return; }
         if (g.kind === 'crypto') { renderCrypto(g); return; }
+        if (g.kind === 'million') { renderMillion(g); return; }
         renderStory(g);
       }
 
@@ -483,7 +540,7 @@ export const GAME_UI = `<!doctype html>
           $('savedRows').innerHTML = games.map(function (g) {
             var statusCls = g.status === 'done' ? 'ended' : g.status === 'cancelled' ? 'cancelled' : 'playing';
             var label = g.outcome ? (g.outcome === 'win' ? 'legend' : 'ended') : (g.status === 'cancelled' ? 'abandoned' : 'in progress');
-            var kindBadge = g.kind === 'market' ? '[market] ' : g.kind === 'crypto' ? '[crypto] ' : '';
+            var kindBadge = g.kind === 'market' ? '[market] ' : g.kind === 'crypto' ? '[crypto] ' : g.kind === 'million' ? '[million] ' : '';
             return '<div class="srow"><span class="loc">' + esc(g.nodeTitle) + '</span>' +
               '<span class="muted">' + kindBadge + '</span>' +
               '<span class="moves">' + esc(g.moves) + '</span>' +
@@ -497,7 +554,7 @@ export const GAME_UI = `<!doctype html>
       }
 
       function helpText() {
-        line('commands: a number picks that choice; for the market try "yes", "no", "pass", "lock"; for crypto try "buy", "sell", "pass"; q saves &amp; quits; a abandons; r or n on the end screen; ? this help.', 'plate');
+        line('commands: a number picks that choice; for the market try "yes", "no", "pass", "lock"; for crypto try "buy", "sell", "pass"; for trivia try "fifty", "phone", "audience", "walk"; q saves &amp; quits; a abandons; r or n on the end screen; ? this help.', 'plate');
       }
 
       function handleInput(raw) {
@@ -522,6 +579,12 @@ export const GAME_UI = `<!doctype html>
           if (v === 'buy') { act(0); return; }
           if (v === 'sell') { act(1); return; }
           if (v === 'pass' || v === 'hold') { act(2); return; }
+        }
+        if (current && current.kind === 'million') {
+          if (v === 'fifty' || v === '5050' || v === '50/50') { act(4); return; }
+          if (v === 'phone' || v === 'friend') { act(5); return; }
+          if (v === 'audience' || v === 'ask') { act(6); return; }
+          if (v === 'walk' || v === 'cash' || v === 'cash out') { act(7); return; }
         }
         var n = Number(v);
         if (Number.isInteger(n) && current && current.choices && n >= 0 && n < current.choices.length) { act(n); return; }
@@ -581,6 +644,21 @@ export const GAME_UI = `<!doctype html>
         } catch (e) { showError(e); }
       });
 
+      $('beginMillionToggle').addEventListener('click', function () {
+        $('millionForm').style.display = $('millionForm').style.display === 'none' ? 'block' : 'none';
+      });
+
+      $('beginMillionGo').addEventListener('click', async function () {
+        try {
+          var body = { kind: 'million' };
+          var seed = Number($('millionSeed').value);
+          if (Number.isInteger(seed) && seed >= 0) body.seed = seed;
+          var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+          localStorage.setItem(KEY, d.game.id);
+          open(d.game.id);
+        } catch (e) { showError(e); }
+      });
+
       $('helpItem').addEventListener('click', function () {
         $('hintBox').style.display = $('hintBox').style.display === 'none' ? 'block' : 'none';
       });
@@ -591,8 +669,8 @@ export const GAME_UI = `<!doctype html>
         try {
           var d = await api('/game/' + current.id);
           var ng = d.game;
-          var nm = ng.kind === 'market' ? ng.market.round + ':' + ng.market.purse : String(ng.moves);
-          var om = current.kind === 'market' ? current.market.round + ':' + current.market.purse : String(current.moves);
+          var nm = ng.kind === 'market' ? ng.market.round + ':' + ng.market.purse : ng.kind === 'million' ? ng.million.round + ':' + ng.million.bank : ng.kind === 'crypto' ? ng.crypto.round + ':' + ng.crypto.purse : String(ng.moves);
+          var om = current.kind === 'market' ? current.market.round + ':' + current.market.purse : current.kind === 'million' ? current.million.round + ':' + current.million.bank : current.kind === 'crypto' ? current.crypto.round + ':' + current.crypto.purse : String(current.moves);
           if (ng.outcome !== current.outcome || nm !== om) renderGame(ng, true);
         } catch (e) { /* silent */ }
       }, 5000);

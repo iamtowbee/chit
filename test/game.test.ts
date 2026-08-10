@@ -28,6 +28,15 @@ import {
   isCryptoBake,
   resolveCryptoPlay,
 } from '../src/game/crypto.js';
+import {
+  MILLION_FIFTY,
+  MILLION_ROUNDS,
+  MILLION_TIERS,
+  MILLION_WALK,
+  initialMillionGame,
+  isMillionBake,
+  resolveMillionPlay,
+} from '../src/game/million.js';
 import { NODES } from '../src/game/story.js';
 
 function pick(data: ReturnType<typeof initialState>, to: string): number {
@@ -598,6 +607,226 @@ describe('crypto game — invested on the live market', () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe('millionaire trivia game — the hot seat', () => {
+  it('builds a deterministic deck of fifteen questions, one per tier', () => {
+    const a = initialMillionGame({ seed: 42 });
+    const b = initialMillionGame({ seed: 42 });
+    expect(a.rounds).toBe(MILLION_ROUNDS);
+    expect(a.questions).toHaveLength(MILLION_ROUNDS);
+    expect(a.questions.map((q) => q.prompt)).toEqual(b.questions.map((q) => q.prompt));
+    for (let i = 0; i < a.questions.length; i += 1) {
+      const q = a.questions[i]!;
+      expect(q.options).toHaveLength(4);
+      expect(q.answer).toBeGreaterThanOrEqual(0);
+      expect(q.answer).toBeLessThan(4);
+      expect(new Set(q.options).size).toBe(4);
+    }
+    const c = initialMillionGame({ seed: 43 });
+    expect(c.questions.map((q) => q.prompt)).not.toEqual(a.questions.map((q) => q.prompt));
+  });
+
+  it('a correct answer banks the tier and moves to the next question', () => {
+    const state = initialMillionGame({ seed: 7 });
+    const answer = state.questions[0]!.answer;
+    const next = resolveMillionPlay(state, answer);
+    expect(next.bank).toBe(MILLION_TIERS[0]);
+    expect(next.round).toBe(1);
+    expect(next.corrects).toBe(1);
+    expect(next.history[0]!.action).toBe('Correct');
+  });
+
+  it('a wrong answer before the first safe haven ends the game broke', () => {
+    const state = initialMillionGame({ seed: 7 });
+    const wrong = state.questions[0]!.answer === 0 ? 1 : 0;
+    const next = resolveMillionPlay(state, wrong);
+    expect(next.outcome).toBe('lose');
+    expect(next.ending).toBe('broke');
+    expect(next.won).toBe(0);
+    expect(next.bank).toBe(0);
+  });
+
+  it('a wrong answer past question five falls to the thousand-dollar floor', () => {
+    let state = initialMillionGame({ seed: 11 });
+    for (let r = 0; r < 5; r += 1) {
+      state = resolveMillionPlay(state, state.questions[r]!.answer);
+    }
+    expect(state.bank).toBe(MILLION_TIERS[4]);
+    const wrong = state.questions[5]!.answer === 0 ? 1 : 0;
+    const next = resolveMillionPlay(state, wrong);
+    expect(next.outcome).toBe('lose');
+    expect(next.ending).toBe('fall');
+    expect(next.won).toBe(MILLION_TIERS[4]);
+  });
+
+  it('50/50 removes two wrong answers and can only be used once', () => {
+    const state = initialMillionGame({ seed: 3 });
+    const answerText = state.questions[0]!.options[state.questions[0]!.answer]!;
+    const after = resolveMillionPlay(state, MILLION_FIFTY);
+    expect(after.lives.fifty).toBe(true);
+    expect(after.questions[0]!.options).toHaveLength(2);
+    expect(after.questions[0]!.options).toContain(answerText);
+    expect(after.decisions).toBe(1);
+    expect(after.round).toBe(0);
+    expect(() => resolveMillionPlay(after, MILLION_FIFTY)).toThrow(/already been used/);
+  });
+
+  it('phone and audience each provide one hint, once', () => {
+    const state = initialMillionGame({ seed: 5 });
+    const phoned = resolveMillionPlay(state, 5);
+    expect(phoned.lives.phone).toBe(true);
+    expect(phoned.hint?.kind).toBe('phone');
+    expect(() => resolveMillionPlay(phoned, 5)).toThrow(/already on the line/);
+    const audience = resolveMillionPlay(phoned, 6);
+    expect(audience.lives.audience).toBe(true);
+    expect(audience.hint?.kind).toBe('audience');
+    expect(audience.hint?.text).toContain('%');
+    expect(() => resolveMillionPlay(audience, 6)).toThrow(/already voted/);
+  });
+
+  it('walking away banks the secured cash and ends the run', () => {
+    let state = initialMillionGame({ seed: 9 });
+    state = resolveMillionPlay(state, state.questions[0]!.answer);
+    state = resolveMillionPlay(state, state.questions[1]!.answer);
+    const bank = state.bank;
+    const walked = resolveMillionPlay(state, MILLION_WALK);
+    expect(walked.outcome).toBe('lose');
+    expect(walked.ending).toBe('walk');
+    expect(walked.won).toBe(bank);
+    expect(walked.walks).toBe(1);
+  });
+
+  it('answering every question right reaches the Grand Bake and a win', () => {
+    let state = initialMillionGame({ seed: 42 });
+    for (let r = 0; r < MILLION_ROUNDS; r += 1) {
+      state = resolveMillionPlay(state, state.questions[r]!.answer);
+    }
+    expect(isMillionBake(state)).toBe(true);
+    expect(state.bank).toBe(MILLION_TIERS[14]);
+    state = resolveMillionPlay(state, 0);
+    expect(state.outcome).toBe('win');
+    expect(state.ending).toBe('grand');
+    expect(state.won).toBe(MILLION_TIERS[14]);
+    expect(state.name).toBe('Cakey the Brave');
+  });
+});
+
+describe('millionaire trivia game over HTTP', () => {
+  let baseUrl: string;
+  let handle: ReturnType<typeof createPlatform>;
+  let server: Server;
+
+  beforeAll(async () => {
+    const port = await new Promise<number>((resolve, reject) => {
+      const srv = createHttpServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+      srv.on('error', reject);
+    });
+    const root = mkdtempSync(path.join(tmpdir(), 'game-million-'));
+    handle = createPlatform({
+      port,
+      dataDir: path.join(root, 'data'),
+      downloadDir: path.join(root, 'downloads'),
+    });
+    server = createHttpServer(handle.app);
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    await handle.store.flush();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('creates a trivia game with answers, lifelines and a walk-away choice', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'million', seed: 3 }),
+      })
+    ).json();
+    const game = created.game;
+    expect(game.kind).toBe('million');
+    expect(game.million.phase).toBe('play');
+    expect(game.million.rounds).toBe(MILLION_ROUNDS);
+    expect(game.million.bank).toBe(0);
+    expect(game.choices.length).toBe(8);
+    expect(game.choices[0].label).toBeTruthy();
+    expect(game.choices.map((c: { label: string }) => c.label)).toContain('50/50 — remove two wrong answers');
+    expect(game.choices.map((c: { label: string }) => c.label)).toContain('Phone a friend');
+    expect(game.choices.map((c: { label: string }) => c.label)).toContain('Ask the audience');
+    expect(game.choices.map((c: { label: string }) => c.label).some((l: string) => /Walk away with/.test(l))).toBe(true);
+    const listed = await (await fetch(`${baseUrl}/game`)).json();
+    expect(listed.games.some((g: { id: string; kind: string }) => g.id === game.id && g.kind === 'million')).toBe(true);
+  });
+
+  it('a wrong answer over HTTP ends the run broke', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'million', seed: 4 }),
+      })
+    ).json();
+    const id = created.game.id;
+    const wrong = created.game.million.question.options;
+    const deck = initialMillionGame({ seed: 4 });
+    const answer = deck.questions[0]!.answer;
+    const wrongIndex = answer === 0 ? 1 : 0;
+    const acted = await (
+      await fetch(`${baseUrl}/game/${id}/act`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ choice: wrongIndex }),
+      })
+    ).json();
+    expect(acted.game.outcome).toBe('lose');
+    expect(acted.game.million.ending).toBe('broke');
+    expect(wrong.length).toBe(4);
+  });
+
+  it('plays a full trivia game to the million over HTTP', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'million', seed: 42 }),
+      })
+    ).json();
+    const id = created.game.id;
+    const deck = initialMillionGame({ seed: 42 });
+    let game = created.game;
+    for (let r = 0; r < MILLION_ROUNDS; r += 1) {
+      const acted = await (
+        await fetch(`${baseUrl}/game/${id}/act`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ choice: deck.questions[r]!.answer }),
+        })
+      ).json();
+      game = acted.game;
+    }
+    expect(game.million.phase).toBe('bake');
+    expect(game.million.bank).toBe(MILLION_TIERS[14]);
+    const named = await (
+      await fetch(`${baseUrl}/game/${id}/act`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ choice: 1 }),
+      })
+    ).json();
+    expect(named.game.outcome).toBe('win');
+    expect(named.game.status).toBe('done');
+    expect(named.game.million.ending).toBe('grand');
+    expect(named.game.million.name).toBe('Sir Frostbite');
+    expect(named.game.million.won).toBe(MILLION_TIERS[14]);
   });
 });
 
