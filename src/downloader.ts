@@ -10,6 +10,97 @@ export class StopError extends Error {
   }
 }
 
+export interface RangeDownloadCallbacks {
+  /** Called roughly every `heartbeatBytes` as bytes are written. */
+  onChunk?: (offset: number, length: number | null, etag: string | null) => void | Promise<void>;
+  /** Called after each chunk; return true to abort with StopError. */
+  shouldStop?: () => Promise<boolean>;
+  /** Chunk callback cadence in bytes (default 512 KiB). */
+  heartbeatBytes?: number;
+}
+
+export interface RangeDownloadResult {
+  length: number | null;
+  etag: string | null;
+  /** Bytes on disk after this pass (equal to the final offset). */
+  offset: number;
+}
+
+/**
+ * Streams a URL into `filePath` (a .part file) using Range requests, resuming
+ * from `startOffset`. Pure engine: no Continue session involvement — callers
+ * drive progress through `onChunk`. Retries and backoff are left to the caller.
+ */
+export async function downloadRange(
+  url: string,
+  filePath: string,
+  startOffset: number,
+  callbacks: RangeDownloadCallbacks = {},
+): Promise<RangeDownloadResult> {
+  const heartbeatBytes = callbacks.heartbeatBytes ?? 512 * 1024;
+  const shouldStop = callbacks.shouldStop ?? (async () => false);
+
+  const res = await fetch(url, {
+    headers: {
+      range: `bytes=${startOffset}-`,
+      'user-agent': 'chit-agent/1.0',
+    },
+  });
+  if (res.status !== 200 && res.status !== 206) {
+    throw new Error(`server responded HTTP ${res.status}`);
+  }
+
+  const resuming = res.status === 206;
+  let offset = startOffset;
+  if (!resuming && startOffset > 0) {
+    await fsp.writeFile(filePath, Buffer.alloc(0));
+    offset = 0;
+  }
+
+  let length: number | null = null;
+  const contentRange = res.headers.get('content-range');
+  if (resuming && contentRange) {
+    const match = /bytes \d+-\d+\/(\d+|\*)/.exec(contentRange);
+    if (match && match[1] !== '*') length = Number(match[1]);
+  }
+  const contentLength = res.headers.get('content-length');
+  if (length === null && contentLength !== null) {
+    length = resuming ? offset + Number(contentLength) : Number(contentLength);
+  }
+  const etag = res.headers.get('etag');
+
+  const handle = await fsp.open(filePath, offset === 0 ? 'w' : 'a');
+  let received = offset;
+  let lastBeat = 0;
+  try {
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('response has no body');
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await handle.write(value);
+      received += value.byteLength;
+      if (received - lastBeat >= heartbeatBytes) {
+        lastBeat = received;
+        if (callbacks.onChunk) {
+          await callbacks.onChunk(received, length, etag);
+        }
+        if (await shouldStop()) {
+          throw new StopError('interrupted');
+        }
+      }
+    }
+    reader.releaseLock();
+  } finally {
+    await handle.close();
+  }
+
+  if (length !== null && received < length) {
+    throw new Error(`incomplete download ${received}/${length} bytes`);
+  }
+  return { length, etag, offset: received };
+}
+
 export interface DownloaderOptions {
   client: ContinueClient;
   downloadDir: string;
@@ -129,64 +220,12 @@ export class Downloader {
     partPath: string,
     session: Session,
   ): Promise<StreamResult> {
-    const res = await fetch(url, {
-      headers: {
-        range: `bytes=${startOffset}-`,
-        'user-agent': 'continue-protocol-downloadbox/1.0',
-      },
+    const result = await downloadRange(url, partPath, startOffset, {
+      heartbeatBytes: this.heartbeatBytes,
+      onChunk: (offset, length, etag) => this.beat(session, offset, length, etag),
+      shouldStop: () => this.isInterrupted(session),
     });
-    if (res.status !== 200 && res.status !== 206) {
-      throw new Error(`server responded HTTP ${res.status}`);
-    }
-
-    const resuming = res.status === 206;
-    let offset = startOffset;
-    if (!resuming && startOffset > 0) {
-      this.log('server ignored Range; restarting from byte 0');
-      await fsp.writeFile(partPath, Buffer.alloc(0));
-      offset = 0;
-    }
-
-    let length: number | null = null;
-    const contentRange = res.headers.get('content-range');
-    if (resuming && contentRange) {
-      const match = /bytes \d+-\d+\/(\d+|\*)/.exec(contentRange);
-      if (match && match[1] !== '*') length = Number(match[1]);
-    }
-    const contentLength = res.headers.get('content-length');
-    if (length === null && contentLength !== null) {
-      length = resuming ? offset + Number(contentLength) : Number(contentLength);
-    }
-    const etag = res.headers.get('etag');
-
-    const handle = await fsp.open(partPath, offset === 0 ? 'w' : 'a');
-    let received = offset;
-    let lastBeat = 0;
-    try {
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('response has no body');
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await handle.write(value);
-        received += value.byteLength;
-        if (received - lastBeat >= this.heartbeatBytes) {
-          lastBeat = received;
-          await this.beat(session, received, length, etag);
-          if (await this.isInterrupted(session)) {
-            throw new StopError('interrupted mid-download');
-          }
-        }
-      }
-      reader.releaseLock();
-    } finally {
-      await handle.close();
-    }
-
-    if (length !== null && received < length) {
-      throw new Error(`incomplete download ${received}/${length} bytes`);
-    }
-    return { length, etag, offset: received };
+    return { length: result.length, etag: result.etag, offset: result.offset };
   }
 
   private async beat(

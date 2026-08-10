@@ -69,6 +69,7 @@ let fileServer: http.Server;
 let apiServer: http.Server;
 let client: ContinueClient;
 let fileServerRanges: string[];
+let store: JsonFileStore;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), 'continue-dbox-data-'));
@@ -78,7 +79,8 @@ beforeEach(async () => {
   fileServer = file.server;
   fileServerRanges = file.ranges;
   filePort = await listen(fileServer);
-  const { app } = createApp({ store: new JsonFileStore(dataDir) });
+  store = new JsonFileStore(dataDir);
+  const { app } = createApp({ store });
   apiServer = http.createServer(app);
   apiPort = await listen(apiServer);
   client = new ContinueClient({ baseUrl: `http://127.0.0.1:${apiPort}` });
@@ -91,6 +93,7 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) =>
     apiServer.close((err) => (err ? reject(err) : resolve())),
   );
+  await store.flush();
   await rm(dataDir, { recursive: true, force: true });
   await rm(workDir, { recursive: true, force: true });
 });

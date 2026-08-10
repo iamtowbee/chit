@@ -2,11 +2,11 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { AgentController } from './agent/controller.js';
 import { createApiKeyAuth, parseApiKeys } from './auth.js';
 import { ContinueClient } from './client.js';
-import { createDownloadBox, type DownloadBoxHandle } from './downloadbox.js';
+import { HttpError } from './errors.js';
 import { OPENAPI } from './openapi.js';
-import { PolyarbController } from './polyarb/controller.js';
 import { createRouter } from './routes.js';
 import { SessionService } from './service.js';
 import { JsonFileStore } from './store.js';
@@ -24,14 +24,14 @@ export interface PlatformHandle {
   app: express.Express;
   service: SessionService;
   store: JsonFileStore;
-  controller: PolyarbController;
-  box: DownloadBoxHandle;
+  agent: AgentController;
   port: number;
 }
 
 /**
- * The unified Chit platform: Continue Protocol session API, the Download Box,
- * and the Polyarb scan controller all on one port, behind one UI.
+ * The Chit platform: one feature, one port. The session API is the runtime,
+ * the Chit Agent is the product — it downloads data, scans for arbitrage and
+ * reports, all in a single resumable Continue session.
  */
 export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
   const port = options.port ?? Number(process.env.PORT ?? 3001);
@@ -48,8 +48,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
   const firstKey = keys.size > 0 ? [...keys.keys()][0] : undefined;
   const client = new ContinueClient({ baseUrl, apiKey: firstKey });
 
-  const box = createDownloadBox({ client, downloadDir });
-  const controller = new PolyarbController(client);
+  const agent = new AgentController(client, downloadDir);
 
   const app = express();
   app.disable('x-powered-by');
@@ -57,7 +56,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
 
   if (keys.size > 0) {
     app.use('/api', createApiKeyAuth(keys));
-    app.use('/polyarb', createApiKeyAuth(keys));
+    app.use('/agent', createApiKeyAuth(keys));
   }
 
   app.use('/api', createRouter(service));
@@ -84,7 +83,14 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
 </html>`);
   });
 
-  app.use('/polyarb', controller.router());
+  app.use('/agent', agent.router());
+
+  app.get('/files/:name', (req: Request, res: Response, next: NextFunction) => {
+    const name = sanitizeFilename(req.params.name!);
+    res.sendFile(path.join(downloadDir, name), (err) => {
+      if (err) next(new HttpError(404, 'file not found'));
+    });
+  });
 
   app.get('/', (_req: Request, res: Response) => {
     res.type('html').send(PLATFORM_UI);
@@ -106,9 +112,15 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
     res.status(500).json({ error: message });
   });
 
-  app.use(box.app);
+  return { app, service, store, agent, port };
+}
 
-  return { app, service, store, controller, box, port };
+function sanitizeFilename(name: string): string {
+  const clean = name
+    .replace(/[\\/]/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+  return clean.trim() === '' ? 'download' : clean;
 }
 
 export function startPlatform(): { server: http.Server; handle: PlatformHandle } {
@@ -120,11 +132,16 @@ export function startPlatform(): { server: http.Server; handle: PlatformHandle }
     console.log(`  data: ${path.resolve(process.env.DATA_DIR ?? './data')}`);
     console.log(`  downloads: ${path.resolve(process.env.DOWNLOAD_DIR ?? './downloads')}`);
   });
-  handle.box.start();
 
   const shutdown = (): void => {
-    handle.box.stop();
-    server.close(() => process.exit(0));
+    const exit = (): void => process.exit(0);
+    Promise.resolve()
+      .then(() => handle.store.flush())
+      .catch(() => undefined)
+      .finally(() => {
+        server.close(() => exit());
+        setTimeout(exit, 2000).unref();
+      });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

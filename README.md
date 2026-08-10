@@ -1,24 +1,26 @@
 # Chit — Agent Platform for Trading
 
-A trading-agent platform: the **Chit JIT core** (`chit/`, Rust + C++ + Python) is the
-high-performance execution engine, and the **Continue Protocol** (`src/`) is the
-agent runtime — an 11-state machine + file-backed persistence layer for
-long-running, resumable agents. On top of that runtime sit real-world
-applications: the **Polyarb** market-scanning and arbitrage bot, and the
-**Download Box** background downloader.
+One product, one agent: a **trading agent** that downloads a data source and scans
+it for arbitrage in a single resumable session. The **Chit JIT core** (`chit/`,
+Rust + C++ + Python) is the high-performance execution engine, and the
+**Continue Protocol** (`src/`) is the agent runtime — an 11-state machine +
+file-backed persistence layer for long-running, resumable agents.
 
 An agent is a **session**: it starts, periodically reports progress via
 heartbeats, and can be picked back up later — even after a crash — using its
-saved checkpoints. Strategies and scans are checkpointed, so a machine that
-reboots or a bot that is interrupted continues from the exact step it stopped at
-instead of restarting.
+saved checkpoints. A run downloads its source file with a Range-resumable engine,
+scans it for arbitrage (within-market and cross-market), and reports — and every
+heartbeat is a checkpoint on the same session, so stopping or crashing resumes
+from the exact byte or iteration it stopped at.
 
 ```
 chit/                 JIT compiler core (Rust + C++, Python bindings)
 src/                  Continue Protocol runtime (TypeScript API + persistence)
-src/polyarb/          Polyarb — Polymarket arbitrage bot
+src/agent.ts          the single agent: download -> scan -> report in one session
+src/agent/controller.ts  /agent/runs HTTP controller + run registry
+src/polyarb/          Polyarb — Polymarket arbitrage engine + bot (used by the agent)
 src/downloader.ts     Range-resumable download engine
-src/downloadbox.ts    Download Box web UI + worker
+src/downloadbox.ts    standalone Download Box web UI + worker (optional)
 examples/             Runnable example apps on the runtime
 ```
 
@@ -81,7 +83,14 @@ graph TD
 - `done`, `cancelled`, `failed` — terminal; no further transitions allowed.
 - **Checkpoint** — each heartbeat/checkpoint appends an immutable snapshot
   (`step`, `progress`, `data`) to the session's history, so work can be resumed
-  from the last known position.
+  from the last known position. History is bounded by `MAX_CHECKPOINTS`
+  (default 500) so the persisted state stays small.
+- **Storage & durability** — sessions are sharded into `dataDir/sessions/<id>.json`
+  (one small file per session; a legacy `dataDir/sessions.json` is migrated
+  automatically on first write). `put` updates memory immediately and writes are
+  coalesced and debounced (`FLUSH_INTERVAL_MS`, default 50) so heartbeats never
+  block on disk; `flush()` is awaited for terminal transitions and on graceful
+  shutdown. Reads are always served from memory.
 - **Watchdog** — marks `active`/`paused`/`resuming`/`retrying` sessions as `stalled`
   when their last heartbeat is older than `STALL_TIMEOUT_MS` (default `60000`).
 - **Retry policy** — optional `maxAttempts` per session. Each `retry` increments
@@ -105,24 +114,29 @@ graph TD
 
 ## Quick start
 
-Everything runs as one app on one port: the Continue Protocol API, the Download
-Box worker + web UI, and the Polyarb scan controller.
+Everything runs as one app on one port: the Continue Protocol API and the
+trading agent.
 
 ```bash
 npm install
-npm run platform    # http://localhost:3001 — unified app (all three panels)
+npm run platform    # http://localhost:3001 — one dashboard, one agent
 ```
 
-State persists to `data/sessions.json` (override with `DATA_DIR`); downloads go
-to `downloads/` (override with `DOWNLOAD_DIR`). Port is `PORT` (default `3001`);
-stall timeout is `STALL_TIMEOUT_MS`.
+State persists to `data/sessions/` (override with `DATA_DIR`); agent downloads
+go to `downloads/` (override with `DOWNLOAD_DIR`). Port is `PORT` (default
+`3001`); stall timeout is `STALL_TIMEOUT_MS`; write coalescing is
+`FLUSH_INTERVAL_MS` (default 50); checkpoint history cap is `MAX_CHECKPOINTS`
+(default 500).
 
-The unified web UI has three tabs:
+The web UI is a single dashboard — no tabs:
 
-- **Sessions** — every agent, download and scan, with status, progress and
-  pause/resume/retry/cancel controls.
-- **Downloads** — paste a URL, watch it download with Range-based resume.
-- **Polyarb** — start/stop Polymarket scans (sim or live) and watch detections.
+- **Run** — paste a data-source URL and start an agent. It downloads the file
+  (Range-based resume), scans it for arbitrage, and reports.
+- **Progress** — live status, bytes downloaded, current scan iteration,
+  opportunities found, and the best return so far.
+- **Session** — the whole run is one Continue session; pause it and resume from
+  the exact byte or iteration. Every run links to its downloaded file at
+  `/files/<name>`.
 
 The same app is also available as separate processes (`npm run dev` = API only,
 `npm run downloadbox` = box only) and as one image via `docker compose up`.
@@ -188,6 +202,44 @@ POST /api/sessions/:id/heartbeat
 { "step": 4, "progress": 0.4, "data": { "cursor": "abc" } }
 ```
 
+## Trading agent (`/agent`)
+
+The agent is the one product: given a data-source URL it downloads the file
+(Range engine), scans it for arbitrage (polyarb engine), and reports — all in a
+single Continue session. Each run lives in the platform's run registry and maps
+to one session, so interrupting and resuming continues from the exact byte or
+iteration.
+
+```
+POST /agent/runs                     # start an agent run
+GET  /agent/runs                     # list runs (running and finished)
+POST /agent/runs/:id/stop            # pause the run (session -> paused, resumable)
+GET  /files/<name>                   # the downloaded source file
+```
+
+```bash
+# Download markets.json, scan 10 iterations (sim), report
+curl -s -X POST localhost:3001/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"sourceUrl":"https://example.com/markets.json","filename":"markets.json","mode":"sim","iterations":10,"intervalMs":500,"minReturn":0.005}'
+
+# Stop mid-run, then resume from the exact iteration using the same session id
+curl -s -X POST localhost:3001/agent/runs/<id>/stop
+curl -s -X POST localhost:3001/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"sourceUrl":"https://example.com/markets.json","filename":"markets.json","mode":"sim","iterations":100,"sessionId":"<session-id>","intervalMs":0}'
+```
+
+Body fields: `sourceUrl` (required, http(s)), `filename`, `mode` (`sim` default |
+`live`), `iterations` (default 10), `intervalMs`, `minReturn` (default 0.005),
+`seed`, and `sessionId` to resume an existing run's session.
+
+On iteration 1 the scan uses the downloaded file parsed as a market snapshot
+(an array of markets, or `{ data: [...] }` / `{ markets: [...] }`); later
+iterations use the simulator (`sim`) or Polymarket's gamma API (`live`).
+Opportunities found on each iteration are logged and the session data carries
+`opportunities`, `bestReturn`, and the downloaded `file`.
+
 ## Error handling
 
 | Status | Meaning |
@@ -221,8 +273,8 @@ not leaked). `GET /api/health` and `/api/docs*` stay public.
 
 ## Docker
 
-The platform (API + Polyarb + Download Box) runs as a single image. The `chit/`
-JIT core is not required at runtime.
+The platform (API + trading agent) runs as a single image. The `chit/` JIT core
+is not required at runtime.
 
 ```bash
 docker build -t chit-platform .
@@ -265,7 +317,7 @@ curl -s -X POST localhost:3001/api/sessions/$SESSION/complete
 curl -s -X POST localhost:3001/api/sessions/$SESSION/finalize
 ```
 
-## Download Box (real-world app)
+## Download Box (optional, standalone)
 
 `src/downloadbox.ts` is a genuine use of the API, not a demo: a web UI + worker
 you run on any wall-powered machine (old laptop, Raspberry Pi, home server) so
@@ -274,8 +326,8 @@ background — with Range-based resume, so if the machine reboots, the network
 drops, or you pause it, the download continues from the exact byte where it
 stopped instead of restarting.
 
-In the unified platform it runs as one of the three panels on `:3001`. It can
-also run standalone:
+It runs standalone on its own port; it is not a platform panel (the platform's
+agent downloads files instead):
 
 ```bash
 # Start the continue API (port 3001)
@@ -301,9 +353,6 @@ curl -X POST http://localhost:3000/downloads/jobs \
 curl -X POST http://localhost:3000/downloads/jobs/<id>/pause
 curl -X POST http://localhost:3000/downloads/jobs/<id>/resume
 ```
-
-With Docker Compose, the `downloadbox` service runs alongside the `continue`
-API and shares the `./downloads` volume.
 
 ## Polyarb — Polymarket arbitrage bot
 
@@ -342,23 +391,11 @@ npm run polyarb -- --mode live --iterations 5
 Every scan is a Continue session. Kill the process mid-run and re-run with the
 same `--session` — it continues from the last heartbeat instead of restarting.
 
-In the unified platform, the **Polyarb** tab drives scans through
-`/polyarb/scans` — the controller runs the same checkpointed bot and keeps a
-live registry of running and finished scans:
-
-```bash
-# Start a sim scan (same endpoints drive the UI)
-curl -s -X POST localhost:3001/polyarb/scans \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"sim","iterations":10,"intervalMs":500,"seed":42}'
-
-# List scans, or stop one
-curl -s localhost:3001/polyarb/scans
-curl -s -X POST localhost:3001/polyarb/scans/<id>/stop
-```
-
-Because every scan session is checkpointed, stopping a scan and restarting it
-with the same `sessionId` continues from the exact iteration it stopped at.
+On the platform, the agent's scan stage drives the same detection engine. The
+controller keeps a live registry of running and finished runs at `/agent/runs`
+(see [Trading agent](#trading-agent-agent)); stopping a run pauses its session,
+and restarting it with the same `sessionId` continues from the exact iteration
+it stopped at.
 
 ### Trading (experimental, on by choice)
 
@@ -456,7 +493,7 @@ mock transport.
 ## Development
 
 ```bash
-npm run platform   # unified app on :3001 (API + box + polyarb)
+npm run platform   # the one app on :3001 — API + trading agent + dashboard
 npm run dev        # API-only, tsx watch
 npm run downloadbox # box standalone on :3000
 npm run polyarb    # polyarb CLI bot
@@ -471,19 +508,21 @@ npm run build      # tsc -> dist/
 chit/              # JIT compiler core (Rust + C++, Python bindings)
 src/
   types.ts    # Session, Checkpoint, 11 statuses, inputs
-  store.ts    # file-backed JSON store (atomic writes)
+  store.ts    # sharded, coalesced file store (one file per session)
   service.ts  # state machine, watchdog, retry policy, webhooks, metrics, pagination
   routes.ts   # REST router
   app.ts      # express app factory + auth + docs
   server.ts   # API-only entrypoint
-  platform.ts # unified entrypoint: API + download box + polyarb on one port
-  ui.ts       # unified web UI (Sessions / Downloads / Polyarb)
+  platform.ts # the one app: API + trading agent on one port
+  ui.ts       # single dashboard (run agent, progress, sessions)
+  agent.ts    # the agent: download -> scan -> report in one Continue session
+  agent/controller.ts # /agent/runs controller + run registry
   client.ts   # typed ContinueClient SDK
   auth.ts     # API-key auth middleware + tenant parsing
   openapi.ts  # OpenAPI 3.0 spec
   downloader.ts  # Range-resumable download engine
-  downloadbox.ts # web UI + worker (real-world download box)
-  polyarb/       # Polymarket arbitrage bot (engine, simulator, live client, executors, bot, controller)
+  downloadbox.ts # standalone web UI + worker (optional)
+  polyarb/       # Polymarket arbitrage engine, simulator, live client, executors, bot
 examples/
   common.ts          # shared CLI/session helpers
   agent/             # LLM multi-step agent runner (resumable)
@@ -495,5 +534,7 @@ test/
   examples.test.ts   # end-to-end tests driving the example apps
   downloadbox.test.ts # end-to-end tests for the download box (resume via Range)
   polyarb.test.ts    # detection engine, simulator, bot resume tests
-  platform-integrated.test.ts # unified app: one port, three panels, auth, isolation
+  agent.test.ts      # agent unit tests: download -> scan -> done, resume, parseSnapshot
+  store.test.ts      # sharded persistence, write coalescing, legacy migration
+  platform-integrated.test.ts # the one app: agent runs, stop/resume, files, auth
 ```

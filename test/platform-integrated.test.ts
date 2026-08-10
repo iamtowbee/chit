@@ -5,7 +5,34 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPlatform } from '../src/platform.js';
 
-const PAYLOAD = Buffer.from('0123456789'.repeat(64));
+const SNAPSHOT = [
+  {
+    id: 'm1',
+    question: 'Will event X happen?',
+    outcomes: [
+      { name: 'Yes', price: 0.55 },
+      { name: 'No', price: 0.4 },
+    ],
+  },
+  {
+    id: 'm2',
+    eventId: 'e2',
+    question: 'Will Y happen? (A)',
+    outcomes: [
+      { name: 'Yes', price: 0.62 },
+      { name: 'No', price: 0.41 },
+    ],
+  },
+  {
+    id: 'm3',
+    eventId: 'e2',
+    question: 'Will Y happen?',
+    outcomes: [
+      { name: 'Yes', price: 0.42 },
+      { name: 'No', price: 0.52 },
+    ],
+  },
+];
 
 function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -19,10 +46,10 @@ function getFreePort(): Promise<number> {
   });
 }
 
-describe('unified platform', () => {
+describe('unified platform — one agent feature', () => {
   let port: number;
   let baseUrl: string;
-  let fileServer: Server;
+  let dataServer: Server;
   let handle: ReturnType<typeof createPlatform>;
 
   beforeAll(async () => {
@@ -38,43 +65,39 @@ describe('unified platform', () => {
       server.listen(port, '127.0.0.1', resolve);
     });
     baseUrl = `http://127.0.0.1:${port}`;
-    handle.box.start();
 
-    fileServer = createHttpServer((req, res) => {
+    const payload = Buffer.from(JSON.stringify(SNAPSHOT));
+    dataServer = createHttpServer((req, res) => {
       const range = req.headers.range;
       if (range) {
-        const match = /^bytes=(\d+)-/.exec(range);
-        const start = match ? Number(match[1]) : 0;
+        const start = Number(/^bytes=(\d+)-/.exec(range)?.[1] ?? 0);
         res.writeHead(206, {
-          'content-range': `bytes ${start}-${PAYLOAD.length - 1}/${PAYLOAD.length}`,
-          'content-length': PAYLOAD.length - start,
+          'content-range': `bytes ${start}-${payload.length - 1}/${payload.length}`,
+          'content-length': payload.length - start,
           'accept-ranges': 'bytes',
         });
-        res.end(PAYLOAD.subarray(start));
+        res.end(payload.subarray(start));
       } else {
-        res.writeHead(200, { 'content-length': PAYLOAD.length });
-        res.end(PAYLOAD);
+        res.writeHead(200, { 'content-length': payload.length });
+        res.end(payload);
       }
     });
-    await new Promise<void>((resolve) => fileServer.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => dataServer.listen(0, '127.0.0.1', resolve));
   });
 
   afterAll(() => {
-    handle.box.stop();
-    fileServer.close();
+    dataServer.close();
   });
 
-  it('serves the unified UI with all three panels', async () => {
+  it('serves the single agent UI (no tabs)', async () => {
     const res = await fetch(`${baseUrl}/`);
     const html = await res.text();
     expect(res.status).toBe(200);
-    expect(html).toContain('Agent Platform for Trading');
-    expect(html).toContain('panel-sessions');
-    expect(html).toContain('panel-downloads');
-    expect(html).toContain('panel-polyarb');
+    expect(html).toContain('Agent for Trading');
+    expect(html.includes('data-tab')).toBe(false);
   });
 
-  it('serves the continue API on the same port', async () => {
+  it('serves the session API on the same port', async () => {
     const health = await (await fetch(`${baseUrl}/api/health`)).json();
     expect(health.ok).toBe(true);
 
@@ -82,129 +105,115 @@ describe('unified platform', () => {
       await fetch(`${baseUrl}/api/sessions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ totalSteps: 5, metadata: { app: 'platform-test' } }),
+        body: JSON.stringify({ totalSteps: 5, metadata: { app: 'test' } }),
       })
     ).json();
     expect(created.session.status).toBe('pending');
-
-    const queued = await (
-      await fetch(`${baseUrl}/api/sessions/${created.session.id}/queue`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-    ).json();
-    expect(queued.session.status).toBe('queued');
-
-    const started = await (
-      await fetch(`${baseUrl}/api/sessions/${created.session.id}/start`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-    ).json();
-    expect(started.session.status).toBe('active');
   });
 
-  it('runs a download end to end on the same port', async () => {
-    const fileUrl = `http://127.0.0.1:${(fileServer.address() as { port: number }).port}/blob.bin`;
-    const enqueued = await (
-      await fetch(`${baseUrl}/downloads/jobs`, {
+  it('runs an agent end to end: download, scan the snapshot, report', async () => {
+    const sourceUrl = `http://127.0.0.1:${(dataServer.address() as { port: number }).port}/markets.json`;
+    const started = await (
+      await fetch(`${baseUrl}/agent/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ url: fileUrl, filename: 'blob.bin' }),
+        body: JSON.stringify({
+          sourceUrl,
+          filename: 'markets.json',
+          mode: 'sim',
+          iterations: 3,
+          intervalMs: 0,
+          minReturn: 0.005,
+          seed: 1,
+        }),
       })
     ).json();
-    const id = enqueued.session.id;
-    expect(enqueued.session.status).toBe('queued');
+    const runId = started.run.id;
+    expect(started.run.status).toBe('running');
 
-    let done = false;
-    for (let i = 0; i < 40 && !done; i += 1) {
-      await handle.box.tick();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const list = await (await fetch(`${baseUrl}/downloads/jobs`)).json();
-      const job = list.jobs.find((j: { session: { id: string } }) => j.session.id === id);
-      done = job && job.session.status === 'done';
+    let run = started.run;
+    for (let i = 0; i < 60 && run.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const list = await (await fetch(`${baseUrl}/agent/runs`)).json();
+      run = list.runs.find((r: { id: string }) => r.id === runId);
     }
-    expect(done).toBe(true);
-
-    const file = await fetch(`${baseUrl}/downloads/files/blob.bin`);
-    expect(file.status).toBe(200);
-    const bytes = Buffer.from(await file.arrayBuffer());
-    expect(bytes.equals(PAYLOAD)).toBe(true);
-  });
-
-  it('runs a polyarb sim scan and reports found opportunities', async () => {
-    const started = await (
-      await fetch(`${baseUrl}/polyarb/scans`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode: 'sim', iterations: 3, intervalMs: 0, seed: 1 }),
-      })
-    ).json();
-    const scanId = started.scan.id;
-    expect(started.scan.status).toBe('running');
-
-    let scan = started.scan;
-    for (let i = 0; i < 40 && scan.status === 'running'; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      const list = await (await fetch(`${baseUrl}/polyarb/scans`)).json();
-      scan = list.scans.find((s: { id: string }) => s.id === scanId);
-    }
-    expect(scan.status).toBe('done');
-    expect(scan.sessionId).toBeTruthy();
-    expect(scan.found).toBeGreaterThanOrEqual(0);
-    expect(scan.iterations).toBe(3);
-
-    const sessions = await (await fetch(`${baseUrl}/api/sessions`)).json();
-    const polySession = sessions.sessions.find(
-      (s: { id: string }) => s.id === scan.sessionId,
-    );
-    expect(polySession.status).toBe('done');
-    expect(polySession.metadata.app).toBe('polyarb');
-  });
-
-  it('stops a running polyarb scan', async () => {
-    const started = await (
-      await fetch(`${baseUrl}/polyarb/scans`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode: 'sim', iterations: 5000, intervalMs: 25, seed: 2 }),
-      })
-    ).json();
-    const scanId = started.scan.id;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    const stopped = await (
-      await fetch(`${baseUrl}/polyarb/scans/${scanId}/stop`, { method: 'POST' })
-    ).json();
-    expect(stopped.scan.status).toBe('stopped');
+    expect(run.status).toBe('done');
+    expect(run.stage).toBe('done');
+    expect(run.found).toBeGreaterThanOrEqual(1);
+    expect(run.bytes).toBe(Buffer.byteLength(JSON.stringify(SNAPSHOT)));
 
     const sessions = await (await fetch(`${baseUrl}/api/sessions`)).json();
     const session = sessions.sessions.find(
-      (s: { id: string }) => s.id === stopped.scan.sessionId,
+      (s: { id: string }) => s.id === run.sessionId,
     );
-    expect(session.status).toBe('cancelled');
+    expect(session.status).toBe('done');
+    expect(session.metadata.app).toBe('agent');
+
+    const file = await fetch(`${baseUrl}/files/markets.json`);
+    expect(file.status).toBe(200);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    expect(JSON.parse(bytes.toString('utf8'))).toEqual(SNAPSHOT);
   });
 
-  it('does not let the download box steal sessions from other apps', async () => {
-    const created = await (
-      await fetch(`${baseUrl}/api/sessions`, {
+  it('stops a running agent and resumes it from its checkpoint', async () => {
+    const sourceUrl = `http://127.0.0.1:${(dataServer.address() as { port: number }).port}/markets.json`;
+    const started = await (
+      await fetch(`${baseUrl}/agent/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ totalSteps: 10, metadata: { app: 'polyarb' } }),
+        body: JSON.stringify({
+          sourceUrl,
+          filename: 'markets.json',
+          mode: 'sim',
+          iterations: 500,
+          intervalMs: 25,
+          minReturn: 0.005,
+          seed: 2,
+        }),
       })
     ).json();
-    const id = created.session.id;
-    await fetch(`${baseUrl}/api/sessions/${id}/queue`, { method: 'POST' });
-    await fetch(`${baseUrl}/api/sessions/${id}/start`, { method: 'POST' });
+    const runId = started.run.id;
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    await handle.box.tick();
-    const session = await (await fetch(`${baseUrl}/api/sessions/${id}`)).json();
-    expect(session.session.status).toBe('active');
-  });
+    const stopped = await (
+      await fetch(`${baseUrl}/agent/runs/${runId}/stop`, { method: 'POST' })
+    ).json();
+    expect(stopped.run.status).toBe('stopped');
 
-  it('supports API-key auth on /api and /polyarb when configured', async () => {
+    const sessions = await (await fetch(`${baseUrl}/api/sessions`)).json();
+    const paused = sessions.sessions.find(
+      (s: { id: string }) => s.id === stopped.run.sessionId,
+    );
+    expect(paused.status).toBe('paused');
+
+    const resumed = await (
+      await fetch(`${baseUrl}/agent/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sourceUrl,
+          filename: 'markets.json',
+          mode: 'sim',
+          iterations: 100,
+          intervalMs: 0,
+          minReturn: 0.005,
+          seed: 2,
+          sessionId: stopped.run.sessionId,
+        }),
+      })
+    ).json();
+    const resumeId = resumed.run.id;
+    let run = resumed.run;
+    for (let i = 0; i < 60 && run.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const list = await (await fetch(`${baseUrl}/agent/runs`)).json();
+      run = list.runs.find((r: { id: string }) => r.id === resumeId);
+    }
+    expect(run.status).toBe('done');
+    expect(run.sessionId).toBe(stopped.run.sessionId);
+  }, 20000);
+
+  it('supports API-key auth on /api and /agent when configured', async () => {
     const port2 = await getFreePort();
     const keys = new Map([['sk-test-123', 'alice']]);
     const h = createPlatform({
@@ -226,8 +235,7 @@ describe('unified platform', () => {
     });
     expect(withKey.status).toBe(200);
 
-    const scanNoKey = await fetch(`http://127.0.0.1:${port2}/polyarb/scans`);
-    expect(scanNoKey.status).toBe(401);
-    h.box.stop();
+    const runsNoKey = await fetch(`http://127.0.0.1:${port2}/agent/runs`);
+    expect(runsNoKey.status).toBe(401);
   });
 });

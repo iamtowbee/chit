@@ -35,6 +35,9 @@ export const DEFAULT_PAGE_SIZE = 20;
 export const MAX_PAGE_SIZE = 100;
 export const PUBLIC_TENANT = 'public';
 
+/** Cap on stored checkpoints per session, keeping the persisted file bounded. */
+export const MAX_CHECKPOINTS = Number(process.env.MAX_CHECKPOINTS ?? 500);
+
 export interface WatchdogOptions {
   timeoutMs?: number;
 }
@@ -350,7 +353,7 @@ export class SessionService {
     }
 
     if (recordCheckpoint) {
-      next.checkpoints = [
+      const appended = [
         ...next.checkpoints,
         {
           id: randomUUID(),
@@ -360,6 +363,9 @@ export class SessionService {
           data: input.data !== undefined ? input.data : next.data,
         },
       ];
+      const max = MAX_CHECKPOINTS;
+      next.checkpoints =
+        appended.length > max ? appended.slice(appended.length - max) : appended;
     }
 
     next.version += 1;
@@ -398,6 +404,9 @@ export class SessionService {
         session: next,
         at: next.updatedAt,
       });
+    }
+    if (TERMINAL_STATUSES.has(next.status)) {
+      await this.store.flush();
     }
     return next;
   }

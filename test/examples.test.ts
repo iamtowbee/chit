@@ -14,11 +14,13 @@ let dataDir: string;
 let workDir: string;
 let server: http.Server;
 let client: ContinueClient;
+let store: JsonFileStore;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), 'continue-examples-data-'));
   workDir = await mkdtemp(path.join(os.tmpdir(), 'continue-examples-work-'));
-  const { app } = createApp({ store: new JsonFileStore(dataDir) });
+  store = new JsonFileStore(dataDir);
+  const { app } = createApp({ store });
   server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
@@ -29,6 +31,7 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) =>
     server.close((err) => (err ? reject(err) : resolve())),
   );
+  await store.flush();
   await rm(dataDir, { recursive: true, force: true });
   await rm(workDir, { recursive: true, force: true });
 });

@@ -142,10 +142,12 @@ describe('bot on the continue API', () => {
   let dataDir: string;
   let apiServer: http.Server;
   let client: ContinueClient;
+  let store: JsonFileStore;
 
   beforeEach(async () => {
     dataDir = await mkdtemp(path.join(os.tmpdir(), 'continue-polyarb-'));
-    const { app } = createApp({ store: new JsonFileStore(dataDir) });
+    store = new JsonFileStore(dataDir);
+    const { app } = createApp({ store });
     apiServer = http.createServer(app);
     await new Promise<void>((resolve) => apiServer.listen(0, '127.0.0.1', resolve));
     const { port } = apiServer.address() as AddressInfo;
@@ -156,6 +158,7 @@ describe('bot on the continue API', () => {
     await new Promise<void>((resolve, reject) =>
       apiServer.close((err) => (err ? reject(err) : resolve())),
     );
+    await store.flush();
     await rm(dataDir, { recursive: true, force: true });
   });
 

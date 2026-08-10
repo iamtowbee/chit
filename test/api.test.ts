@@ -18,6 +18,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await store.flush();
   await rm(dataDir, { recursive: true, force: true });
 });
 
@@ -248,6 +249,7 @@ describe('continue/resume API - 11-state machine', () => {
       .post(`/api/sessions/${id}/heartbeat`)
       .send({ step: 1, progress: 0.5 });
 
+    await store.flush();
     const freshStore = new JsonFileStore(dataDir);
     const freshApp = createApp({ store: freshStore }).app;
     const res = await request(freshApp).get(`/api/sessions/${id}`);
