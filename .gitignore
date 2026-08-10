@@ -174,3 +174,10 @@
 *.lz
 *.lzma
 *.iso
+
+# Continue Protocol
+**/data/
+
+# Chit core (vendored JIT compiler) — keep its tracked build inputs
+!chit/rust/Cargo.lock
+!chit/native/libchit.dylib
