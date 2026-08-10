@@ -22,6 +22,8 @@ export interface PolyarbOptions {
   log?: (message: string) => void;
   /** Test hook: invoked after each iteration's heartbeat. */
   onIteration?: (iteration: number) => void | Promise<void>;
+  /** Test hook: invoked after detection with the iteration's opportunities. */
+  onFound?: (iteration: number, opportunities: Opportunity[]) => void;
 }
 
 export interface PolyarbRun {
@@ -75,6 +77,9 @@ export async function runPolyarb(options: PolyarbOptions): Promise<PolyarbRun> {
     const markets = await dataSource.next();
     const opportunities = engine.detect(markets, { minReturn: options.minReturn });
     found += opportunities.length;
+    if (options.onFound) {
+      options.onFound(iteration, opportunities);
+    }
 
     let trades: string[] = [];
     if (executor && opportunities.length > 0) {

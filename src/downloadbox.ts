@@ -63,6 +63,7 @@ export function createDownloadBox(options: DownloadBoxOptions): DownloadBoxHandl
         (session) =>
           PROCESSABLE.has(session.status) &&
           !processing.has(session.id) &&
+          typeof (session.metadata as { url?: unknown })?.url === 'string' &&
           Date.now() >= (cooldownUntil.get(session.id) ?? 0),
       );
       if (!candidate) return;

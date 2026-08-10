@@ -1,5 +1,5 @@
 services:
-  continue:
+  platform:
     build: .
     ports:
       - "3001:3001"
@@ -8,21 +8,8 @@ services:
       - STALL_TIMEOUT_MS=60000
       - API_KEYS=${API_KEYS:-}
       - DATA_DIR=/app/data
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-
-  downloadbox:
-    build: .
-    command: ["node", "dist/downloadbox.js"]
-    depends_on:
-      - continue
-    ports:
-      - "3000:3000"
-    environment:
-      - PORT=3000
-      - CONTINUE_BASE_URL=http://continue:3001
       - DOWNLOAD_DIR=/app/downloads
     volumes:
+      - ./data:/app/data
       - ./downloads:/app/downloads
     restart: unless-stopped

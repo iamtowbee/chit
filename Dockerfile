@@ -24,4 +24,4 @@ COPY --from=build /app/dist ./dist
 EXPOSE 3001
 VOLUME ["/app/data"]
 
-CMD ["node", "dist/server.js"]
+CMD ["node", "dist/platform.js"]

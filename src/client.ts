@@ -18,15 +18,18 @@ export interface Metrics {
 export interface ClientOptions {
   baseUrl: string;
   fetchImpl?: typeof fetch;
+  apiKey?: string;
 }
 
 export class ContinueClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly apiKey: string | undefined;
 
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
+    this.apiKey = options.apiKey;
   }
 
   async create(
@@ -138,6 +141,7 @@ export class ContinueClient {
   ): Promise<unknown> {
     const headers: Record<string, string> = {
       ...(options.body !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(this.apiKey ? { 'x-api-key': this.apiKey } : {}),
       ...options.headers,
     };
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {

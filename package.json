@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "description": "Continue/Resume API - a small state machine + persistence layer for resumable work",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/platform.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js",
+    "start": "node dist/platform.js",
+    "platform": "tsx src/platform.ts",
     "downloadbox": "tsx src/downloadbox.ts",
     "polyarb": "tsx src/polyarb/bot.ts",
     "build": "tsc",

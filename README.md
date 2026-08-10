@@ -105,13 +105,27 @@ graph TD
 
 ## Quick start
 
+Everything runs as one app on one port: the Continue Protocol API, the Download
+Box worker + web UI, and the Polyarb scan controller.
+
 ```bash
 npm install
-npm run dev          # http://localhost:3001
+npm run platform    # http://localhost:3001 — unified app (all three panels)
 ```
 
-State persists to `data/sessions.json` (override with `DATA_DIR`).
-Port is `PORT` (default `3001`); stall timeout is `STALL_TIMEOUT_MS`.
+State persists to `data/sessions.json` (override with `DATA_DIR`); downloads go
+to `downloads/` (override with `DOWNLOAD_DIR`). Port is `PORT` (default `3001`);
+stall timeout is `STALL_TIMEOUT_MS`.
+
+The unified web UI has three tabs:
+
+- **Sessions** — every agent, download and scan, with status, progress and
+  pause/resume/retry/cancel controls.
+- **Downloads** — paste a URL, watch it download with Range-based resume.
+- **Polyarb** — start/stop Polymarket scans (sim or live) and watch detections.
+
+The same app is also available as separate processes (`npm run dev` = API only,
+`npm run downloadbox` = box only) and as one image via `docker compose up`.
 
 ## API
 
@@ -260,6 +274,9 @@ background — with Range-based resume, so if the machine reboots, the network
 drops, or you pause it, the download continues from the exact byte where it
 stopped instead of restarting.
 
+In the unified platform it runs as one of the three panels on `:3001`. It can
+also run standalone:
+
 ```bash
 # Start the continue API (port 3001)
 npm run dev
@@ -268,9 +285,9 @@ npm run dev
 npm run downloadbox
 ```
 
-Open http://localhost:3000 — add a URL, watch live progress, and use
-Pause / Resume / Retry / Cancel. Completed files are served at
-`/downloads/files/<name>`.
+Open the Downloads tab (or http://localhost:3000 standalone) — add a URL, watch
+live progress, and use Pause / Resume / Retry / Cancel. Completed files are
+served at `/downloads/files/<name>`.
 
 Environment variables: `PORT` (default 3000), `CONTINUE_BASE_URL` (default
 `http://127.0.0.1:3001`), `DOWNLOAD_DIR` (default `./downloads`).
@@ -324,6 +341,24 @@ npm run polyarb -- --mode live --iterations 5
 
 Every scan is a Continue session. Kill the process mid-run and re-run with the
 same `--session` — it continues from the last heartbeat instead of restarting.
+
+In the unified platform, the **Polyarb** tab drives scans through
+`/polyarb/scans` — the controller runs the same checkpointed bot and keeps a
+live registry of running and finished scans:
+
+```bash
+# Start a sim scan (same endpoints drive the UI)
+curl -s -X POST localhost:3001/polyarb/scans \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"sim","iterations":10,"intervalMs":500,"seed":42}'
+
+# List scans, or stop one
+curl -s localhost:3001/polyarb/scans
+curl -s -X POST localhost:3001/polyarb/scans/<id>/stop
+```
+
+Because every scan session is checkpointed, stopping a scan and restarting it
+with the same `sessionId` continues from the exact iteration it stopped at.
 
 ### Trading (experimental, on by choice)
 
@@ -421,7 +456,10 @@ mock transport.
 ## Development
 
 ```bash
-npm run dev        # tsx watch
+npm run platform   # unified app on :3001 (API + box + polyarb)
+npm run dev        # API-only, tsx watch
+npm run downloadbox # box standalone on :3000
+npm run polyarb    # polyarb CLI bot
 npm test           # vitest + supertest
 npm run typecheck  # tsc --noEmit
 npm run build      # tsc -> dist/
@@ -437,13 +475,15 @@ src/
   service.ts  # state machine, watchdog, retry policy, webhooks, metrics, pagination
   routes.ts   # REST router
   app.ts      # express app factory + auth + docs
-  server.ts   # entrypoint
+  server.ts   # API-only entrypoint
+  platform.ts # unified entrypoint: API + download box + polyarb on one port
+  ui.ts       # unified web UI (Sessions / Downloads / Polyarb)
   client.ts   # typed ContinueClient SDK
   auth.ts     # API-key auth middleware + tenant parsing
   openapi.ts  # OpenAPI 3.0 spec
   downloader.ts  # Range-resumable download engine
   downloadbox.ts # web UI + worker (real-world download box)
-  polyarb/       # Polymarket arbitrage bot (engine, simulator, live client, executors, bot)
+  polyarb/       # Polymarket arbitrage bot (engine, simulator, live client, executors, bot, controller)
 examples/
   common.ts          # shared CLI/session helpers
   agent/             # LLM multi-step agent runner (resumable)
@@ -455,4 +495,5 @@ test/
   examples.test.ts   # end-to-end tests driving the example apps
   downloadbox.test.ts # end-to-end tests for the download box (resume via Range)
   polyarb.test.ts    # detection engine, simulator, bot resume tests
+  platform-integrated.test.ts # unified app: one port, three panels, auth, isolation
 ```
