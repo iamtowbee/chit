@@ -228,10 +228,18 @@ export const GAME_UI = `<!doctype html>
             </label>
             <button class="item" id="beginMarket">begin trading</button>
           </div>
+          <button class="item" id="beginCryptoToggle">3. invest in crypto</button>
+          <div id="cryptoForm" class="market-form" style="display:none">
+            <label>seed (optional)
+              <input id="cryptoSeed" type="number" placeholder="a number" />
+            </label>
+            <label class="check"><input id="cryptoLive" type="checkbox" /> use live CoinGecko prices</label>
+            <button class="item" id="beginCryptoGo">begin trading</button>
+          </div>
           <button class="item dim" id="helpItem">?. help</button>
         </div>
         <div id="hintBox" class="hint" style="display:none">
-          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
+          on the play screen, type a choice's number or its word — <span class="mono">yes</span>, <span class="mono">no</span>, <span class="mono">pass</span>, <span class="mono">lock</span>, or <span class="mono">buy</span>/<span class="mono">sell</span> — and press Enter. <span class="mono">q</span> saves &amp; quits, <span class="mono">a</span> abandons, <span class="mono">?</span> shows help.
         </div>
         <div id="saved" class="saved">
           <h3>saved games</h3>
@@ -316,7 +324,11 @@ export const GAME_UI = `<!doctype html>
         $('again').onclick = async function () {
           try {
             var body = null;
-            if (g.kind === 'market') body = JSON.stringify({ kind: 'market', seed: Number($('mktSeed').value) || undefined });
+            if (g.kind === 'market') {
+              body = JSON.stringify({ kind: 'market', seed: Number($('mktSeed').value) || undefined });
+            } else if (g.kind === 'crypto') {
+              body = JSON.stringify({ kind: 'crypto', seed: Number($('cryptoSeed').value) || undefined, mode: $('cryptoLive') && $('cryptoLive').checked ? 'live' : 'sim' });
+            }
             var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body });
             localStorage.setItem(KEY, d.game.id);
             open(d.game.id);
@@ -373,6 +385,40 @@ export const GAME_UI = `<!doctype html>
         if (!g.outcome) choices(g);
       }
 
+      function renderCrypto(g) {
+        var c = g.crypto;
+        line('round ' + (c.phase !== 'end' ? c.round + 1 : c.round) + ' of ' + c.rounds, 'muted');
+        line('wallet  ' + fmt(c.purse) + '   (goal ' + fmt(c.startPurse * 1.15) + ')', 'purse');
+        if (!g.outcome && c.coin) {
+          line(c.coin.symbol + ' — ' + c.coin.name, 'loc');
+          var ch = c.coin.change >= 0 ? '+' : '';
+          line('$' + fmt(c.coin.price) + '   (' + ch + (c.coin.change * 100).toFixed(2) + '% vs last check)', 'plate');
+          if (c.holding) {
+            var h = c.holding;
+            line('holding  ' + h.shares.toFixed(4) + ' ' + h.symbol + ' @ $' + fmt(h.entryPrice) + '  (cost $' + fmt(h.cost) + (h.unrealized >= 0 ? ', unrealized +$' : ', unrealized -$') + fmt(Math.abs(h.unrealized)) + ')', 'purse');
+          }
+          line(g.text, 'prose');
+        } else if (!g.outcome) {
+          line(g.text, 'prose');
+        } else {
+          var win = g.outcome === 'win';
+          line('--------------------------------------------', 'rule');
+          line(win ? 'the grand bake is won' : 'the market closes', win ? 'win' : 'lose');
+          line(g.text, 'prose');
+          line('buys ' + c.buys + '   sells ' + c.sells + '   wins ' + c.wins + '   losses ' + c.losses + '   passes ' + c.passes, 'plate');
+          if (c.ending === 'grand' && c.name) line('the legend of ' + c.name + ' is told across the ovenlands', 'win');
+          line('press r to trade again, or n for saved games', 'muted');
+          terminalButtons(g);
+        }
+        var hist = c.history || [];
+        for (var i = lastHist; i < hist.length; i += 1) {
+          var h2 = hist[i];
+          line('  ' + h2.round + '. ' + h2.action + ' ' + h2.coin + ' @ $' + fmt(h2.price) + '   ' + (h2.result >= 0 ? '+' : '') + fmt(h2.result) + ' &rarr; ' + fmt(h2.purseAfter), h2.result >= 0 ? 'win' : 'lose');
+        }
+        lastHist = Math.max(lastHist, hist.length);
+        if (!g.outcome) choices(g);
+      }
+
       function renderGame(g, keep) {
         current = g;
         ended = g.outcome !== null;
@@ -383,6 +429,9 @@ export const GAME_UI = `<!doctype html>
         if (g.kind === 'market') {
           var m = g.market;
           $('playMoves').textContent = 'round ' + (m.phase !== 'end' ? m.round + 1 : m.round) + '/' + m.rounds;
+        } else if (g.kind === 'crypto') {
+          var c = g.crypto;
+          $('playMoves').textContent = 'round ' + (c.phase !== 'end' ? c.round + 1 : c.round) + '/' + c.rounds;
         } else {
           $('playMoves').textContent = 'move ' + g.moves;
         }
@@ -393,6 +442,7 @@ export const GAME_UI = `<!doctype html>
           lastHist = 0;
         }
         if (g.kind === 'market') { renderMarket(g); return; }
+        if (g.kind === 'crypto') { renderCrypto(g); return; }
         renderStory(g);
       }
 
@@ -433,7 +483,7 @@ export const GAME_UI = `<!doctype html>
           $('savedRows').innerHTML = games.map(function (g) {
             var statusCls = g.status === 'done' ? 'ended' : g.status === 'cancelled' ? 'cancelled' : 'playing';
             var label = g.outcome ? (g.outcome === 'win' ? 'legend' : 'ended') : (g.status === 'cancelled' ? 'abandoned' : 'in progress');
-            var kindBadge = g.kind === 'market' ? '[market] ' : '';
+            var kindBadge = g.kind === 'market' ? '[market] ' : g.kind === 'crypto' ? '[crypto] ' : '';
             return '<div class="srow"><span class="loc">' + esc(g.nodeTitle) + '</span>' +
               '<span class="muted">' + kindBadge + '</span>' +
               '<span class="moves">' + esc(g.moves) + '</span>' +
@@ -467,6 +517,11 @@ export const GAME_UI = `<!doctype html>
           if (v === 'yes' || v === 'buy yes') { act(1); return; }
           if (v === 'no' || v === 'buy no') { act(2); return; }
           if (v === 'pass') { act(3); return; }
+        }
+        if (current && current.kind === 'crypto') {
+          if (v === 'buy') { act(0); return; }
+          if (v === 'sell') { act(1); return; }
+          if (v === 'pass' || v === 'hold') { act(2); return; }
         }
         var n = Number(v);
         if (Number.isInteger(n) && current && current.choices && n >= 0 && n < current.choices.length) { act(n); return; }
@@ -504,6 +559,21 @@ export const GAME_UI = `<!doctype html>
           var url = $('mktUrl').value.trim();
           if (url) body.sourceUrl = url;
           var seed = Number($('mktSeed').value);
+          if (Number.isInteger(seed) && seed >= 0) body.seed = seed;
+          var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+          localStorage.setItem(KEY, d.game.id);
+          open(d.game.id);
+        } catch (e) { showError(e); }
+      });
+
+      $('beginCryptoToggle').addEventListener('click', function () {
+        $('cryptoForm').style.display = $('cryptoForm').style.display === 'none' ? 'block' : 'none';
+      });
+
+      $('beginCryptoGo').addEventListener('click', async function () {
+        try {
+          var body = { kind: 'crypto', mode: $('cryptoLive') && $('cryptoLive').checked ? 'live' : 'sim' };
+          var seed = Number($('cryptoSeed').value);
           if (Number.isInteger(seed) && seed >= 0) body.seed = seed;
           var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
           localStorage.setItem(KEY, d.game.id);

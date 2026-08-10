@@ -22,6 +22,12 @@ import {
   resolveMarketPlay,
   type MarketGameData,
 } from '../src/game/market.js';
+import {
+  cryptoPriceOf,
+  initialCryptoGame,
+  isCryptoBake,
+  resolveCryptoPlay,
+} from '../src/game/crypto.js';
 import { NODES } from '../src/game/story.js';
 
 function pick(data: ReturnType<typeof initialState>, to: string): number {
@@ -512,5 +518,170 @@ describe('market game over HTTP', () => {
     expect(named.game.outcome).toBe('win');
     expect(named.game.status).toBe('done');
     expect(named.game.market.ending).toBe('grand');
+  });
+});
+
+describe('crypto game — invested on the live market', () => {
+  it('buys a stake and holds the coin', async () => {
+    const state = await initialCryptoGame({ seed: 1, live: false });
+    expect(state.kind).toBe('crypto');
+    expect(state.coin).not.toBeNull();
+    expect(state.source).toBe('sim');
+    const before = state.purse;
+    const next = await resolveCryptoPlay(state, 0);
+    expect(next.holding).not.toBeNull();
+    expect(next.holding?.symbol).toBe(state.coin?.symbol);
+    expect(next.purse).toBeCloseTo(before - before * 0.5, 5);
+    expect(next.buys).toBe(1);
+    expect(next.history[0]?.action).toContain('Buy');
+  });
+
+  it('rejects a second buy while holding', async () => {
+    const state = await initialCryptoGame({ seed: 1, live: false });
+    const after = await resolveCryptoPlay(state, 0);
+    await expect(resolveCryptoPlay(after, 0)).rejects.toThrow(/already holding/);
+  });
+
+  it('passing keeps the purse unchanged', async () => {
+    const state = await initialCryptoGame({ seed: 3, live: false });
+    const next = await resolveCryptoPlay(state, 2);
+    expect(next.purse).toBe(state.purse);
+    expect(next.passes).toBe(1);
+  });
+
+  it('a sell into a rising market realises a profit', async () => {
+    const state = await initialCryptoGame({ seed: 269, live: false });
+    let s = await resolveCryptoPlay(state, 0);
+    expect(s.holding?.symbol).toBe('BTC');
+    const entry = s.holding!.entryPrice;
+    s = await resolveCryptoPlay(s, 2);
+    s = await resolveCryptoPlay(s, 2);
+    s = await resolveCryptoPlay(s, 2);
+    s = await resolveCryptoPlay(s, 2);
+    s = await resolveCryptoPlay(s, 2);
+    const market = cryptoPriceOf(s, 'BTC');
+    expect(market).toBeGreaterThan(entry);
+    const purseBefore = s.purse;
+    const sold = await resolveCryptoPlay(s, 1);
+    expect(sold.holding).toBeNull();
+    expect(sold.purse).toBeGreaterThan(purseBefore);
+    expect(sold.wins).toBe(1);
+    expect(sold.history[6]?.action).toBe('Sell BTC');
+  });
+
+  it('riding a winner to the Grand Bake', async () => {
+    const state = await initialCryptoGame({ seed: 269, live: false });
+    let s = state;
+    const sequence = [0, 2, 2, 2, 2, 2, 1, 0, 1, 0];
+    for (const choice of sequence) {
+      s = await resolveCryptoPlay(s, choice);
+    }
+    expect(isCryptoBake(s)).toBe(true);
+    expect(s.purse).toBeGreaterThanOrEqual(s.startPurse * 1.15);
+    s = await resolveCryptoPlay(s, 0);
+    expect(s.outcome).toBe('win');
+    expect(s.ending).toBe('grand');
+    expect(s.name).toBe('Cakey the Brave');
+  });
+
+  it('falls back to anchor prices when the live feed is unreachable', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error('network down');
+    };
+    try {
+      const state = await initialCryptoGame({ seed: 1, live: true });
+      expect(state.source).toBe('live');
+      expect(state.coin).not.toBeNull();
+      const next = await resolveCryptoPlay(state, 2);
+      expect(next.round).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe('crypto game over HTTP', () => {
+  let baseUrl: string;
+  let handle: ReturnType<typeof createPlatform>;
+  let server: Server;
+
+  beforeAll(async () => {
+    const port = await new Promise<number>((resolve, reject) => {
+      const srv = createHttpServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+      srv.on('error', reject);
+    });
+    const root = mkdtempSync(path.join(tmpdir(), 'game-crypto-'));
+    handle = createPlatform({
+      port,
+      dataDir: path.join(root, 'data'),
+      downloadDir: path.join(root, 'downloads'),
+    });
+    server = createHttpServer(handle.app);
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    await handle.store.flush();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('creates a sim crypto game with buy, sell and pass choices', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'crypto', seed: 1 }),
+      })
+    ).json();
+    const game = created.game;
+    expect(game.kind).toBe('crypto');
+    expect(game.crypto.phase).toBe('play');
+    expect(game.crypto.rounds).toBe(10);
+    expect(game.choices.map((c: { label: string }) => c.label)).toContain('Pass this window');
+    expect(game.choices.some((c: { label: string }) => c.label.startsWith('Buy '))).toBe(true);
+    const listed = await (await fetch(`${baseUrl}/game`)).json();
+    expect(listed.games.some((g: { id: string; kind: string }) => g.id === game.id && g.kind === 'crypto')).toBe(true);
+  });
+
+  it('plays a full crypto game to a won Grand Bake over HTTP', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'crypto', seed: 269 }),
+      })
+    ).json();
+    const id = created.game.id;
+    let game = created.game;
+    const sequence = [0, 2, 2, 2, 2, 2, 1, 0, 1, 0];
+    for (const choice of sequence) {
+      const acted = await (
+        await fetch(`${baseUrl}/game/${id}/act`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ choice }),
+        })
+      ).json();
+      game = acted.game;
+    }
+    expect(game.crypto.phase).toBe('bake');
+    const named = await (
+      await fetch(`${baseUrl}/game/${id}/act`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ choice: 1 }),
+      })
+    ).json();
+    expect(named.game.outcome).toBe('win');
+    expect(named.game.status).toBe('done');
+    expect(named.game.crypto.ending).toBe('grand');
+    expect(named.game.crypto.name).toBe('Sir Frostbite');
   });
 });
