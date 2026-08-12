@@ -18,6 +18,7 @@ import {
 } from './engine.js';
 import {
   buildPlays,
+  buildPlaysFromSnapshot,
   initialMarketGame,
   isBakePhase,
   isMarketGame,
@@ -70,6 +71,8 @@ export interface GameCreateInput {
   sourceUrl?: string;
   filename?: string;
   seed?: number;
+  /** market only: trade the agent's latest downloaded snapshot instead of downloading or simulating */
+  latest?: boolean;
 }
 
 export interface GameChoiceView {
@@ -219,23 +222,34 @@ export class GameController {
   }
 
   private async createMarket(input: GameCreateInput): Promise<GameView> {
-    const mode: 'sim' | 'file' = input.sourceUrl ? 'file' : 'sim';
+    const mode: 'sim' | 'file' = input.latest || input.sourceUrl ? 'file' : 'sim';
     const seed = Number.isInteger(input.seed) && (input.seed as number) >= 0
       ? (input.seed as number)
       : 1;
+    const filename = input.latest
+      ? input.filename?.trim() || 'market-snapshot.json'
+      : input.filename?.trim();
     const source = mode === 'file'
-      ? input.filename?.trim() || input.sourceUrl || 'snapshot'
+      ? filename || input.sourceUrl || 'snapshot'
       : 'simulator';
     let plays: MarketPlay[];
     try {
-      const built = await buildPlays({
-        mode,
-        sourceUrl: input.sourceUrl,
-        filename: input.filename,
-        seed,
-        downloadDir: this.downloadDir,
-      });
-      plays = built.plays;
+      if (input.latest) {
+        if (!this.downloadDir) {
+          throw new Error('snapshot mode requires a download directory');
+        }
+        const built = await buildPlaysFromSnapshot(filename as string, this.downloadDir);
+        plays = built.plays;
+      } else {
+        const built = await buildPlays({
+          mode,
+          sourceUrl: input.sourceUrl,
+          filename,
+          seed,
+          downloadDir: this.downloadDir,
+        });
+        plays = built.plays;
+      }
     } catch (err) {
       throw new HttpError(400, `could not build the market: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -462,10 +476,10 @@ export class GameController {
     } else if (bake) {
       title = 'The Grand Bake';
       text =
-        'The Ovenlight rises. With ' +
+        'With ' +
         data.purse.toFixed(2) +
-        ' frostings in your purse, you have earned the right to a name. ' +
-        'Cak, choose it wisely.';
+        ' frostings banked, the win is yours. ' +
+        'Cak, choose the name for the record books.';
       choices = BAKE_NAMES.map((name, index) => ({ index, label: `Name yourself ${name}` }));
     } else if (current) {
       title = current.question;
@@ -548,10 +562,10 @@ export class GameController {
     } else if (bake) {
       title = 'The Grand Bake';
       text =
-        'The Ovenlight rises. Your wallet holds ' +
+        'Your wallet holds ' +
         data.purse.toFixed(2) +
-        ' frostings — earned the hard way, coin by coin. ' +
-        'Cak, choose the name that will be told across the ovenlands.';
+        ' frostings — banked the hard way, coin by coin. ' +
+        'Cak, choose the name for the record books.';
       choices = BAKE_NAMES.map((name, index) => ({ index, label: `Name yourself ${name}` }));
     } else if (holding && heldPrice !== null) {
       const change = heldPrice > 0 ? (heldPrice - holding.entryPrice) / holding.entryPrice : 0;
@@ -669,8 +683,8 @@ export class GameController {
     } else if (bake) {
       title = 'The Grand Bake';
       text =
-        'The Ovenlight rises. Fifteen questions, fifteen right answers, and the million is yours. ' +
-        'Cak, choose the name that will be told across the ovenlands.';
+        'Fifteen questions, fifteen right answers, and a million frostings banked. ' +
+        'Cak, choose the name for the record books.';
       choices = BAKE_NAMES.map((name, index) => ({ index, label: `Name yourself ${name}` }));
     } else if (question) {
       title = question.prompt;
@@ -814,6 +828,7 @@ export class GameController {
           mode: body.mode,
           sourceUrl: typeof body.sourceUrl === 'string' ? body.sourceUrl : undefined,
           filename: typeof body.filename === 'string' ? body.filename : undefined,
+          latest: body.latest === true,
           seed: body.seed,
         });
         res.status(201).json({ game });
@@ -895,75 +910,69 @@ function gameDataOf(session: Session): GameData {
 function endingText(data: MarketGameData): string {
   if (data.ending === 'grand') {
     return (
-      'The Great Oven opens its door to you, ' +
-      (data.name ?? 'Cak') +
-      '. From ' +
+      'From ' +
       data.startPurse.toFixed(0) +
-      ' frostings you traded your way to ' +
+      ' frostings, ' +
+      (data.name ?? 'Cak') +
+      ' traded to ' +
       data.purse.toFixed(2) +
       ', locking ' +
       data.arbs +
-      ' arbitrage windows. You chose yourself — one warm answer at a time.'
+      ' arbitrage windows along the way.'
     );
   }
   if (data.ending === 'broke') {
     return (
-      'Your purse of frostings runs dry. The exchange closes its ledger on you, and ' +
-      'Cak limps back to the Ovenlands with ' +
+      'Your purse of frostings runs dry: ' +
       data.wins +
-      ' wins and ' +
+      ' wins, ' +
       data.losses +
-      ' losses to remember. The market always has another window — start again.'
+      ' losses. The market always opens another window — start again.'
     );
   }
   return (
-    'The windows close and your purse holds ' +
+    'The windows close with ' +
     data.purse.toFixed(2) +
-    ' frostings — not enough for the Grand Bake. ' +
-    'Cak is not broke, but Cak is not brave. The Grand Bake needs one more spark; the market will be open tomorrow.'
+    ' frostings banked — short of the goal. The market will open again tomorrow.'
   );
 }
 
 function cryptoEndingText(data: CryptoGameData): string {
   if (data.ending === 'grand') {
     return (
-      'The Great Oven opens its door to you, ' +
       (data.name ?? 'Cak') +
-      '. You turned ' +
+      ' turned ' +
       data.startPurse.toFixed(0) +
       ' frostings into ' +
       data.purse.toFixed(2) +
-      ' by ' +
+      ' with ' +
       data.buys +
       ' buys and ' +
       data.sells +
-      ' sells across the coin boards. Cak chose the market, and the market chose Cak.'
+      ' sells across the coin boards.'
     );
   }
   if (data.ending === 'broke') {
     return (
-      'Your wallet empties to nothing. Cak stares at the ticker with ' +
+      'The wallet hits zero: ' +
       data.wins +
-      ' good trades and ' +
+      ' good trades, ' +
       data.losses +
-      ' bad ones. Every great baker starts over — the coins will be here tomorrow.'
+      ' bad ones. The coins will be here tomorrow — start again.'
     );
   }
   return (
-    'The boards close and your wallet holds ' +
+    'The boards close with ' +
     data.purse.toFixed(2) +
-    ' frostings — not enough for the Grand Bake. ' +
-    'Cak learned the ticker but not the nerve. The market will be open again at first light.'
+    ' frostings banked — short of the goal. Trade again at first light.'
   );
 }
 
 function millionEndingText(data: MillionGameData): string {
   if (data.ending === 'grand') {
     return (
-      'The Great Oven opens its door to you, ' +
       (data.name ?? 'Cak') +
-      '. Fifteen questions, fifteen right answers, and a million frostings in the vault. ' +
-      'Cak chose the answer, and the answer chose Cak.'
+      ' answered fifteen straight and banked a million frostings.'
     );
   }
   if (data.ending === 'walk') {

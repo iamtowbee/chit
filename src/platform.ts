@@ -6,6 +6,7 @@ import { AgentController } from './agent/controller.js';
 import { createApiKeyAuth, parseApiKeys } from './auth.js';
 import { ContinueClient } from './client.js';
 import { HttpError } from './errors.js';
+import { BotRunner } from './game/bot.js';
 import { GameController } from './game/controller.js';
 import { GAME_UI } from './game/ui.js';
 import { OPENAPI } from './openapi.js';
@@ -28,6 +29,7 @@ export interface PlatformHandle {
   store: JsonFileStore;
   agent: AgentController;
   game: GameController;
+  bot: BotRunner;
   port: number;
 }
 
@@ -53,6 +55,11 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
 
   const agent = new AgentController(client, downloadDir);
   const game = new GameController(client, downloadDir);
+  const bot = new BotRunner({
+    dataFile: path.join(dataDir, 'bot-ledger.json'),
+    downloadDir,
+  });
+  bot.load();
 
   const app = express();
   app.disable('x-powered-by');
@@ -62,6 +69,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
     app.use('/api', createApiKeyAuth(keys));
     app.use('/agent', createApiKeyAuth(keys));
     app.use('/game', createApiKeyAuth(keys));
+    app.use('/bot', createApiKeyAuth(keys));
   }
 
   app.use('/api', createRouter(service));
@@ -96,6 +104,20 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
 
   app.use('/game', game.router());
 
+  app.get('/bot', (_req: Request, res: Response) => {
+    res.json({ status: bot.status() });
+  });
+
+  app.post('/bot/start', (_req: Request, res: Response) => {
+    bot.start();
+    res.json({ status: bot.status() });
+  });
+
+  app.post('/bot/stop', (_req: Request, res: Response) => {
+    bot.stop();
+    res.json({ status: bot.status() });
+  });
+
   app.get('/files/:name', (req: Request, res: Response, next: NextFunction) => {
     const name = sanitizeFilename(req.params.name!);
     res.sendFile(path.join(downloadDir, name), (err) => {
@@ -123,7 +145,7 @@ export function createPlatform(options: PlatformOptions = {}): PlatformHandle {
     res.status(500).json({ error: message });
   });
 
-  return { app, service, store, agent, game, port };
+  return { app, service, store, agent, game, bot, port };
 }
 
 function sanitizeFilename(name: string): string {
@@ -142,6 +164,8 @@ export function startPlatform(): { server: http.Server; handle: PlatformHandle }
     console.log(`chit platform listening on http://0.0.0.0:${port}`);
     console.log(`  data: ${path.resolve(process.env.DATA_DIR ?? './data')}`);
     console.log(`  downloads: ${path.resolve(process.env.DOWNLOAD_DIR ?? './downloads')}`);
+    handle.bot.start();
+    console.log('  autopilot: running');
   });
 
   const shutdown = (): void => {

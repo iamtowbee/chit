@@ -38,7 +38,23 @@ export const GAME_UI = `<!doctype html>
         margin: 12px 0 6px;
         overflow-x: auto;
       }
-      .home .tag { color: var(--dim); margin-bottom: 28px; }
+      .home .tag { color: var(--dim); margin-bottom: 16px; }
+      .bot {
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--gold);
+        padding: 10px 14px;
+        margin-bottom: 18px;
+      }
+      .bothead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+      .bothead .brand { color: var(--gold); }
+      .bot .purse { color: var(--gold); }
+      .botline { margin: 2px 0 4px; }
+      .bot .row { margin: 8px 0; }
+      .bot .row button { padding: 6px 12px; }
+      .botlog { margin-top: 6px; font-size: 13px; color: var(--dim); max-height: 160px; overflow-y: auto; }
+      .botlog .brun { margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .botlog .brun.win { color: var(--green); }
+      .botlog .brun.lose { color: var(--red); }
       .menu { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 24px; }
       .menu .item {
         width: 100%;
@@ -211,15 +227,29 @@ export const GAME_UI = `<!doctype html>
       <section id="home" class="home">
         <pre class="ascii">###################################################
 #                                                 #
-#    I T ' S   C A K                             #
-#    a text game baked on the live market        #
+#    I T ' S   C A K                              #
+#    a money game on the live market              #
 #                                                 #
 ###################################################</pre>
-        <div class="tag">a tiny cake's quest &middot; each move is a checkpoint &middot; trade the windows, chase the Grand Bake</div>
+        <div class="tag">make money, make it multiply &middot; the autopilot plays while you play &middot; trade the windows, flip the coins, chase the million</div>
+        <div class="bot">
+          <div class="bothead">
+            <span class="brand">autopilot</span>
+            <span id="botBadge" class="pill">idle</span>
+            <span id="botFeed" class="hint"></span>
+          </div>
+          <div class="botline">bankroll <span id="botBank" class="purse">$0.00</span> &middot; <span id="botMeta"></span></div>
+          <div id="botCurrent" class="hint">the autopilot is idle &mdash; press start and it trades every money mode by itself</div>
+          <div class="row">
+            <button id="botStart">start autopilot</button>
+            <button id="botStop">stop autopilot</button>
+          </div>
+          <div id="botLog"></div>
+        </div>
         <div class="menu">
-          <button class="item" id="begin">1. begin a new story</button>
-          <button class="item" id="beginMarketToggle">2. play the market</button>
+          <button class="item" id="beginMarketToggle">1. play the market</button>
           <div id="marketForm" class="market-form" style="display:none">
+            <label class="check"><input id="mktLatest" type="checkbox" checked /> trade the latest agent snapshot</label>
             <label>feed url (optional)
               <input id="mktUrl" placeholder="https://host/path/markets.json" />
             </label>
@@ -228,7 +258,7 @@ export const GAME_UI = `<!doctype html>
             </label>
             <button class="item" id="beginMarket">begin trading</button>
           </div>
-          <button class="item" id="beginCryptoToggle">3. invest in crypto</button>
+          <button class="item" id="beginCryptoToggle">2. invest in crypto</button>
           <div id="cryptoForm" class="market-form" style="display:none">
             <label>seed (optional)
               <input id="cryptoSeed" type="number" placeholder="a number" />
@@ -236,13 +266,14 @@ export const GAME_UI = `<!doctype html>
             <label class="check"><input id="cryptoLive" type="checkbox" /> use live CoinGecko prices</label>
             <button class="item" id="beginCryptoGo">begin trading</button>
           </div>
-          <button class="item" id="beginMillionToggle">4. answer the millionaire questions</button>
+          <button class="item" id="beginMillionToggle">3. answer the millionaire questions</button>
           <div id="millionForm" class="market-form" style="display:none">
             <label>seed (optional)
               <input id="millionSeed" type="number" placeholder="a number" />
             </label>
             <button class="item" id="beginMillionGo">take the hot seat</button>
           </div>
+          <button class="item dim" id="begin">4. a quiet tale, if you ever rest</button>
           <button class="item dim" id="helpItem">?. help</button>
         </div>
         <div id="hintBox" class="hint" style="display:none">
@@ -332,7 +363,7 @@ export const GAME_UI = `<!doctype html>
           try {
             var body = null;
             if (g.kind === 'market') {
-              body = JSON.stringify({ kind: 'market', seed: Number($('mktSeed').value) || undefined });
+              body = JSON.stringify({ kind: 'market', seed: Number($('mktSeed').value) || undefined, latest: $('mktLatest') && $('mktLatest').checked ? true : undefined });
             } else if (g.kind === 'crypto') {
               body = JSON.stringify({ kind: 'crypto', seed: Number($('cryptoSeed').value) || undefined, mode: $('cryptoLive') && $('cryptoLive').checked ? 'live' : 'sim' });
             } else if (g.kind === 'million') {
@@ -619,8 +650,10 @@ export const GAME_UI = `<!doctype html>
       $('beginMarket').addEventListener('click', async function () {
         try {
           var body = { kind: 'market' };
+          var latest = $('mktLatest') && $('mktLatest').checked;
+          if (latest) body.latest = true;
           var url = $('mktUrl').value.trim();
-          if (url) body.sourceUrl = url;
+          if (!latest && url) body.sourceUrl = url;
           var seed = Number($('mktSeed').value);
           if (Number.isInteger(seed) && seed >= 0) body.seed = seed;
           var d = await api('/game/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -674,6 +707,37 @@ export const GAME_UI = `<!doctype html>
           if (ng.outcome !== current.outcome || nm !== om) renderGame(ng, true);
         } catch (e) { /* silent */ }
       }, 5000);
+
+      function refreshBot() {
+        api('/bot').then(function (d) {
+          var s = d.status;
+          $('botBadge').className = 'pill' + (s.active ? ' playing' : '');
+          $('botBadge').textContent = s.active ? 'running' : 'idle';
+          $('botBank').textContent = '$' + fmt(s.bankroll);
+          $('botMeta').textContent = s.runs + ' runs' + ' \u00b7 ' + s.wins + ' wins' + ' \u00b7 ' + s.losses + ' losses';
+          if (s.current) {
+            var c = s.current;
+            $('botCurrent').textContent = 'now: ' + c.kind + ' #' + c.seed + ' \u00b7 ' + c.feed + ' \u00b7 r' + (c.round + 1) + '/' + c.rounds + ' \u00b7 $' + fmt(c.result) + (c.lastStep ? ' \u00b7 ' + c.lastStep : '');
+          } else {
+            $('botCurrent').textContent = s.active ? 'between runs \u2026' : 'the autopilot is idle \u2014 press start and it trades every money mode by itself';
+          }
+          $('botLog').innerHTML = (s.recent || []).map(function (r) {
+            var cls = r.outcome === 'win' ? ' win' : r.outcome === 'lose' ? ' lose' : '';
+            var sign = r.net >= 0 ? '+' : '';
+            return '<div class="brun' + cls + '">[' + r.kind + '] #' + r.seed + ' \u00b7 ' + r.feed + ' \u00b7 ' + sign + fmt(r.net) + ' \u2192 ' + fmt(r.result) + ' \u00b7 ' + (r.outcome || '...') + '</div>';
+          }).join('');
+        }).catch(function () { /* silent */ });
+      }
+
+      $('botStart').addEventListener('click', function () {
+        api('/bot/start', { method: 'POST' }).then(refreshBot).catch(showError);
+      });
+
+      $('botStop').addEventListener('click', function () {
+        api('/bot/stop', { method: 'POST' }).then(refreshBot).catch(showError);
+      });
+
+      setInterval(refreshBot, 2000);
 
       showHome();
       var last = localStorage.getItem(KEY);

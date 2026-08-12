@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPlatform } from '../src/platform.js';
 import { SessionService } from '../src/service.js';
 import { JsonFileStore } from '../src/store.js';
+import { BotRunner } from '../src/game/bot.js';
 import {
   applyChoice,
   availableChoices,
@@ -17,6 +18,7 @@ import {
 } from '../src/game/engine.js';
 import {
   buildPlays,
+  buildPlaysFromSnapshot,
   initialMarketGame,
   isBakePhase,
   resolveMarketPlay,
@@ -914,3 +916,181 @@ describe('crypto game over HTTP', () => {
     expect(named.game.crypto.name).toBe('Sir Frostbite');
   });
 });
+
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs = 15000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('condition not met within ' + timeoutMs + 'ms');
+}
+
+const TRADE_SNAPSHOT = [
+  { id: 'm1', question: 'Will event X happen?', outcomes: [{ name: 'Yes', price: 0.55 }, { name: 'No', price: 0.4 }] },
+  { id: 'm2', question: 'Will event Y happen?', outcomes: [{ name: 'Yes', price: 0.62 }, { name: 'No', price: 0.41 }] },
+];
+
+describe('market snapshot integration — play the agent\'s real data', () => {
+  it('builds plays straight from a local agent snapshot', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'game-snap-'));
+    const dir = path.join(root, 'downloads');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'market-snapshot.json'), JSON.stringify(TRADE_SNAPSHOT));
+    const { plays, markets } = await buildPlaysFromSnapshot('market-snapshot.json', dir);
+    expect(markets).toBe(2);
+    expect(plays.length).toBeGreaterThan(0);
+    for (const play of plays) expect(play.bestReturn).toBeGreaterThan(0);
+  });
+
+  it('throws when the snapshot is missing', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'game-snap-'));
+    await expect(buildPlaysFromSnapshot('market-snapshot.json', path.join(root, 'none'))).rejects.toThrow(/no markets/);
+  });
+});
+
+describe('autopilot bot — the money modes play themselves', () => {
+  it('runs market, crypto and million, banking each run into a persisted ledger', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'game-bot-'));
+    const dataFile = path.join(root, 'bot-ledger.json');
+    const bot = new BotRunner({ dataFile, moveMs: 1, gapMs: 1 });
+    bot.load();
+    bot.start();
+    await waitFor(() => bot.status().runs >= 3);
+    bot.stop();
+    const status = bot.status();
+    expect(status.runs).toBeGreaterThanOrEqual(3);
+    const kinds = status.recent.map((r) => r.kind);
+    expect(kinds).toContain('market');
+    expect(kinds).toContain('crypto');
+    expect(kinds).toContain('million');
+    for (const run of status.recent.filter((r) => r.kind === 'market')) {
+      expect(run.outcome).toBe('win');
+      expect(run.net).toBeGreaterThan(0);
+    }
+    const loaded = new BotRunner({ dataFile, moveMs: 1, gapMs: 1 });
+    loaded.load();
+    expect(loaded.status().runs).toBe(status.runs);
+    expect(loaded.status().bankroll).toBeCloseTo(status.bankroll, 2);
+  });
+
+  it('trades the latest agent snapshot when it is present', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'game-bot-'));
+    const downloads = path.join(root, 'downloads');
+    mkdirSync(downloads, { recursive: true });
+    writeFileSync(path.join(downloads, 'market-snapshot.json'), JSON.stringify(TRADE_SNAPSHOT));
+    const bot = new BotRunner({
+      dataFile: path.join(root, 'bot-ledger.json'),
+      downloadDir: downloads,
+      moveMs: 1,
+      gapMs: 1,
+    });
+    bot.start();
+    await waitFor(() => bot.status().runs >= 1);
+    bot.stop();
+    const market = bot.status().recent.find((r) => r.kind === 'market');
+    expect(market).toBeDefined();
+    expect(market!.feed).toBe('market-snapshot.json');
+    expect(market!.outcome).not.toBeNull();
+    expect(market!.endedAt).not.toBeNull();
+  });
+
+  it('stops the loop and holds the ledger', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'game-bot-'));
+    const bot = new BotRunner({ dataFile: path.join(root, 'bot-ledger.json'), moveMs: 1, gapMs: 1 });
+    bot.start();
+    await waitFor(() => bot.status().runs >= 1);
+    bot.stop();
+    const count = bot.status().runs;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(bot.status().runs).toBe(count);
+    expect(bot.status().active).toBe(false);
+  });
+}, 20000);
+
+describe('trading integration over HTTP — the autopilot trades the agent snapshot', () => {
+  let port: number;
+  let baseUrl: string;
+  let server: Server;
+  let handle: ReturnType<typeof createPlatform>;
+
+  beforeAll(async () => {
+    port = await new Promise<number>((resolve, reject) => {
+      const srv = createHttpServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+      srv.on('error', reject);
+    });
+    const root = mkdtempSync(path.join(tmpdir(), 'game-trade-'));
+    const downloads = path.join(root, 'downloads');
+    mkdirSync(downloads, { recursive: true });
+    writeFileSync(path.join(downloads, 'market-snapshot.json'), JSON.stringify(TRADE_SNAPSHOT));
+    handle = createPlatform({
+      port,
+      dataDir: path.join(root, 'data'),
+      downloadDir: downloads,
+    });
+    server = createHttpServer(handle.app);
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    handle.bot.stop();
+    await handle.store.flush();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('creates a market game from the latest agent snapshot with latest:true', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'market', latest: true }),
+      })
+    ).json();
+    expect(created.game.kind).toBe('market');
+    expect(created.game.market.mode).toBe('file');
+    expect(created.game.market.source).toBe('market-snapshot.json');
+    expect(created.game.market.rounds).toBeGreaterThanOrEqual(1);
+  });
+
+  it('rejects a latest game when no snapshot has been downloaded', async () => {
+    const created = await (
+      await fetch(`${baseUrl}/game/new`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'market', latest: true, filename: 'absent.json' }),
+      })
+    ).json();
+    expect(created.error).toMatch(/no markets in snapshot absent.json/);
+  });
+
+  it('starts the autopilot, trades the snapshot, and stops it', async () => {
+    const idle = await (await fetch(`${baseUrl}/bot`)).json();
+    expect(idle.status.active).toBe(false);
+
+    const started = await (await fetch(`${baseUrl}/bot/start`, { method: 'POST' })).json();
+    expect(started.status.active).toBe(true);
+
+    await waitFor(async () => {
+      const d = await (await fetch(`${baseUrl}/bot`)).json();
+      return d.status.runs >= 1;
+    });
+
+    const running = await (await fetch(`${baseUrl}/bot`)).json();
+    expect(running.status.runs).toBeGreaterThanOrEqual(1);
+    const market = running.status.recent.find((r: { kind: string }) => r.kind === 'market');
+    expect(market).toBeDefined();
+    expect(market.feed).toBe('market-snapshot.json');
+
+    const stopped = await (await fetch(`${baseUrl}/bot/stop`, { method: 'POST' })).json();
+    expect(stopped.status.active).toBe(false);
+  });
+}, 30000);

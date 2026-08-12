@@ -98,11 +98,21 @@ export function isMarketGame(value: unknown): value is MarketGameData {
   );
 }
 
+function playsFromMarkets(markets: Market[]): {
+  plays: MarketPlay[];
+  markets: number;
+} {
+  const opportunities = engine.detect(markets, { minReturn: 0.001 });
+  return {
+    plays: opportunities.slice(0, MAX_PLAYS).map(toPlay),
+    markets: markets.length,
+  };
+}
+
 export async function buildPlays(options: BuildPlaysOptions): Promise<{
   plays: MarketPlay[];
   markets: number;
 }> {
-  let markets: Market[] = [];
   if (options.mode === 'file' && options.sourceUrl) {
     if (!options.downloadDir) {
       throw new Error('file mode requires a download directory');
@@ -114,18 +124,31 @@ export async function buildPlays(options: BuildPlaysOptions): Promise<{
     const finalPath = path.join(downloadDir, filename);
     await downloadRange(options.sourceUrl, partPath, 0);
     await rename(partPath, finalPath);
-    markets = (await parseSnapshot(finalPath)) ?? [];
-  } else {
-    const simulator = new Simulator({ seed: options.seed ?? 1, events: 16 });
-    for (let tick = 0; tick < 10 && markets.length < 60; tick += 1) {
-      markets.push(...(await simulator.next()));
-    }
+    const markets = (await parseSnapshot(finalPath)) ?? [];
+    return playsFromMarkets(markets);
   }
-  const opportunities = engine.detect(markets, { minReturn: 0.001 });
-  return {
-    plays: opportunities.slice(0, MAX_PLAYS).map(toPlay),
-    markets: markets.length,
-  };
+  const simulator = new Simulator({ seed: options.seed ?? 1, events: 16 });
+  const markets: Market[] = [];
+  for (let tick = 0; tick < 10 && markets.length < 60; tick += 1) {
+    markets.push(...(await simulator.next()));
+  }
+  return playsFromMarkets(markets);
+}
+
+/**
+ * Build plays straight from a snapshot the trading agent already downloaded.
+ * No network, no source URL: the game trades the same data the agent scanned.
+ */
+export async function buildPlaysFromSnapshot(
+  filename: string,
+  downloadDir: string,
+): Promise<{ plays: MarketPlay[]; markets: number }> {
+  const filePath = path.join(downloadDir, filename);
+  const snapshot = await parseSnapshot(filePath);
+  if (!snapshot || snapshot.length === 0) {
+    throw new Error(`no markets in snapshot ${filename}`);
+  }
+  return playsFromMarkets(snapshot);
 }
 
 export function isBakePhase(state: MarketGameData): boolean {
